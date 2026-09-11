@@ -1,0 +1,22 @@
+{
+  "name": "DoseSpeak",
+  "short_name": "DoseSpeak",
+  "description": "DoseSpeak is an accessibility-first healthcare assistant that helps elderly patients easily scan, understand, and hear medicine instructions in their preferred language.",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#000000",
+  "background_color": "#ffffff",
+  "scope": "/"
+}
