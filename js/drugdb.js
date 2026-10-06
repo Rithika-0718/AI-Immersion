@@ -1,732 +1,1552 @@
 /**
  * DoseSpeak — Real DrugDB Medicine Database API Client
- * Official Search Endpoint: https://drugdb.in/search?q={USER_QUERY}&type=medicine&limit=20
  *
- * Implements:
- *   - Debouncing (350ms)
+ * Official Search Endpoint:
+ * https://drugdb.in/search?q={USER_QUERY}&type=medicine&limit=20
+ *
+ * Features:
+ *   - Real DrugDB live API search
+ *   - 350ms debounce
  *   - AbortController request cancellation
- *   - Monotonic request counter (stale response protection)
- *   - Factual instruction synthesizer adhering to safe boundaries
- *   - In-memory cache & offline fallback generics
+ *   - Monotonic request counter for stale-response protection
+ *   - Case-insensitive partial matching
+ *   - In-memory cache
+ *   - Offline/local fallback dataset
+ *   - Safe factual medicine instructions
+ *   - English, Tamil, Hindi, Telugu, Kannada, Malayalam
+ *
+ * IMPORTANT:
+ *   This file does NOT calculate personalized dosage.
+ *   Users should follow their prescription/doctor/pharmacist instructions.
  */
 
 const DrugDB = (() => {
   const BASE_URL = 'https://drugdb.in/search';
   const CACHE = new Map();
+
+  const DEBOUNCE_DELAY = 350;
+  const MIN_QUERY_LENGTH = 2;
+  const MAX_RESULTS = 20;
+
   let currentAbortController = null;
   let latestRequestId = 0;
+  let debounceTimer = null;
 
   /**
-   * Search DrugDB live API with debounce and request cancellation
+   * Search DrugDB live API.
+   *
+   * The function waits 350ms before sending the request.
+   * If another search is made during that time, the previous
+   * pending search is cancelled.
+   *
    * @param {string} query Search keyword
-   * @returns {Promise<Array>} Array of parsed medicine objects
+   * @returns {Promise<Array>} Array of medicine objects
    */
-  async function search(query) {
-    const trimmed = (query || '').trim();
-    if (trimmed.length < 2) {
-      return [];
+  function search(query) {
+    const trimmed = String(query || '').trim();
+
+    if (trimmed.length < MIN_QUERY_LENGTH) {
+      cancelPendingRequest();
+      return Promise.resolve([]);
     }
 
     const cacheKey = trimmed.toLowerCase();
+
+    // Return cached result immediately.
     if (CACHE.has(cacheKey)) {
-      return CACHE.get(cacheKey);
+      return Promise.resolve(CACHE.get(cacheKey));
     }
 
-    // Cancel pending request if any
+    // Clear previous debounce timer.
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+
+    // Cancel previous API request.
     if (currentAbortController) {
       currentAbortController.abort();
+      currentAbortController = null;
     }
-    currentAbortController = new AbortController();
+
     const requestId = ++latestRequestId;
 
-    const url = `${BASE_URL}?q=${encodeURIComponent(trimmed)}&type=medicine&limit=20`;
+    return new Promise((resolve) => {
+      debounceTimer = setTimeout(async () => {
+        debounceTimer = null;
 
-    try {
-      const response = await fetch(url, {
-        signal: currentAbortController.signal,
-        headers: {
-          'Accept': 'application/json'
+        // If a newer request has already been created,
+        // this request is no longer relevant.
+        if (requestId !== latestRequestId) {
+          resolve([]);
+          return;
         }
-      });
 
-      if (!response.ok) {
-        throw new Error(`DrugDB returned HTTP ${response.status}`);
-      }
+        currentAbortController = new AbortController();
 
-      const data = await response.json();
+        try {
+          const results = await fetchDrugDB(
+            trimmed,
+            requestId,
+            currentAbortController.signal
+          );
 
-      // Ensure this is still the latest request (stale protection)
-      if (requestId !== latestRequestId) {
-        return [];
-      }
+          // Protect against stale responses.
+          if (requestId !== latestRequestId) {
+            resolve([]);
+            return;
+          }
 
-      const rawResults = Array.isArray(data.results) ? data.results : [];
-      const parsed = rawResults.map((item, index) => parseDrugDBItem(item, index));
+          CACHE.set(cacheKey, results);
+          resolve(results);
+        } catch (error) {
+          // Ignore intentionally cancelled requests.
+          if (error && error.name === 'AbortError') {
+            resolve([]);
+            return;
+          }
 
-      // Cache the parsed result
-      CACHE.set(cacheKey, parsed);
-      return parsed;
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        return [];
-      }
-      console.warn('DrugDB API live fetch issue, checking fallback repository:', err);
+          console.warn(
+            'DrugDB API request failed. Using local fallback dataset.',
+            error
+          );
 
-      // Fallback search in verified local pharmaceutical dataset
-      const localMatches = searchFallbackMedicines(trimmed);
-      return localMatches;
-    }
+          // Only allow the latest request to use fallback results.
+          if (requestId !== latestRequestId) {
+            resolve([]);
+            return;
+          }
+
+          const fallbackResults = searchFallbackMedicines(trimmed);
+
+          // Cache fallback result too.
+          CACHE.set(cacheKey, fallbackResults);
+
+          resolve(fallbackResults);
+        } finally {
+          if (requestId === latestRequestId) {
+            currentAbortController = null;
+          }
+        }
+      }, DEBOUNCE_DELAY);
+    });
   }
 
   /**
-   * Parse a raw item from DrugDB response
+   * Perform the actual DrugDB API request.
+   *
+   * @param {string} query
+   * @param {number} requestId
+   * @param {AbortSignal} signal
+   * @returns {Promise<Array>}
+   */
+  async function fetchDrugDB(query, requestId, signal) {
+    const url =
+      `${BASE_URL}?q=${encodeURIComponent(query)}` +
+      `&type=medicine&limit=${MAX_RESULTS}`;
+
+    const response = await fetch(url, {
+      method: 'GET',
+      signal,
+      headers: {
+        Accept: 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`DrugDB returned HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // Stale request protection immediately after API response.
+    if (requestId !== latestRequestId) {
+      return [];
+    }
+
+    const rawResults = extractResults(data);
+
+    const parsedResults = rawResults
+      .map((item, index) => parseDrugDBItem(item, index))
+      .filter(Boolean);
+
+    return parsedResults.slice(0, MAX_RESULTS);
+  }
+
+  /**
+   * Extract medicine results from different possible DrugDB
+   * response structures.
+   *
+   * Supports:
+   *   { results: [...] }
+   *   { data: [...] }
+   *   { medicines: [...] }
+   *   [...] directly
+   *
+   * @param {*} data API response
+   * @returns {Array}
+   */
+  function extractResults(data) {
+    if (Array.isArray(data)) {
+      return data;
+    }
+
+    if (!data || typeof data !== 'object') {
+      return [];
+    }
+
+    if (Array.isArray(data.results)) {
+      return data.results;
+    }
+
+    if (Array.isArray(data.data)) {
+      return data.data;
+    }
+
+    if (Array.isArray(data.medicines)) {
+      return data.medicines;
+    }
+
+    if (Array.isArray(data.items)) {
+      return data.items;
+    }
+
+    return [];
+  }
+
+  /**
+   * Cancel debounce timer and active API request.
+   */
+  function cancelPendingRequest() {
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+
+    if (currentAbortController) {
+      currentAbortController.abort();
+      currentAbortController = null;
+    }
+
+    latestRequestId++;
+  }
+
+  /**
+   * Parse one raw DrugDB medicine item.
+   *
+   * @param {Object} item
+   * @param {number} index
+   * @returns {Object|null}
    */
   function parseDrugDBItem(item, index = 0) {
-    const rawName = item.medicineName || item.name || 'Medicine';
-    const brand = item['brand.brandName'] || (item.brand && item.brand.brandName) || extractBrand(rawName);
-    const manufacturer = item['manufacturer.manufacturerName'] || (item.manufacturer && item.manufacturer.manufacturerName) || 'Licensed Indian Manufacturer';
-    const generic = item['generic.genericName'] || (item.generic && item.generic.genericName) || extractGeneric(rawName);
-    const sctid = item.medicineSctid || item.sctid || `sctid-${Date.now()}-${index}`;
+    if (!item || typeof item !== 'object') {
+      return null;
+    }
 
-    // Extract strength if present in string (e.g. 500 mg, 650 mg, 10 mg)
-    const strengthMatch = rawName.match(/(\d+(?:\.\d+)?\s*(?:mg|g|mcg|ml|iu|%))/i);
-    const strength = strengthMatch ? strengthMatch[1] : '';
+    const rawName = firstNonEmpty([
+      item.medicineName,
+      item.medicine_name,
+      item.name,
+      item.productName,
+      item.product_name,
+      item.title
+    ]) || 'Medicine';
 
-    // Assign appropriate icon & category
+    const brand = firstNonEmpty([
+      item.brand,
+      item.brandName,
+      item.brand_name,
+      item['brand.brandName'],
+      item['brand.name'],
+      item.brand?.brandName,
+      item.brand?.name
+    ]) || extractBrand(rawName);
+
+    const manufacturer = firstNonEmpty([
+      item.manufacturer,
+      item.manufacturerName,
+      item.manufacturer_name,
+      item['manufacturer.manufacturerName'],
+      item['manufacturer.name'],
+      item.manufacturer?.manufacturerName,
+      item.manufacturer?.name
+    ]) || 'Not specified';
+
+    const generic = firstNonEmpty([
+      item.generic,
+      item.genericName,
+      item.generic_name,
+      item['generic.genericName'],
+      item['generic.name'],
+      item.generic?.genericName,
+      item.generic?.name
+    ]) || extractGeneric(rawName);
+
+    const sctid = firstNonEmpty([
+      item.medicineSctid,
+      item.medicine_sctid,
+      item.sctid,
+      item.SCTID,
+      item.id
+    ]) || `local-${Date.now()}-${index}`;
+
+    const strength = extractStrength(
+      rawName,
+      item.strength || item.dose || item.strengthValue
+    );
+
     const { icon, category } = classifyMedicine(rawName, generic);
 
-    // Build verified safe factual instructions in 6 languages
-    const instructions = buildFactualInstructions(rawName, generic, brand);
+    const instructions = buildFactualInstructions(
+      rawName,
+      generic,
+      brand
+    );
 
     return {
-      id: `drugdb-${sctid}`,
-      sctid,
+      id: `drugdb-${String(sctid)}`,
+      sctid: String(sctid),
+
       name: formatMedicineName(rawName),
-      rawName,
-      brand,
-      generic,
-      manufacturer,
+      rawName: String(rawName),
+
+      brand: String(brand),
+      generic: String(generic),
+      manufacturer: String(manufacturer),
+
       strength,
+
       category,
       icon,
+
       isLiveDrugDB: true,
+
       instructions
     };
   }
 
   /**
-   * Clean and capitalize medicine names for readable elderly display
+   * Return the first usable non-empty value.
+   *
+   * @param {Array} values
+   * @returns {string}
+   */
+  function firstNonEmpty(values) {
+    for (const value of values) {
+      if (value === null || value === undefined) {
+        continue;
+      }
+
+      if (typeof value === 'object') {
+        continue;
+      }
+
+      const stringValue = String(value).trim();
+
+      if (stringValue) {
+        return stringValue;
+      }
+    }
+
+    return '';
+  }
+
+  /**
+   * Extract medicine strength.
+   *
+   * Examples:
+   *   500 mg
+   *   650 mg
+   *   10 mg
+   *   5 mg
+   *   100 mcg
+   *   40 mg
+   *   1000 IU
+   *
+   * @param {string} rawName
+   * @param {*} suppliedStrength
+   * @returns {string}
+   */
+  function extractStrength(rawName, suppliedStrength) {
+    if (
+      suppliedStrength !== null &&
+      suppliedStrength !== undefined &&
+      String(suppliedStrength).trim()
+    ) {
+      return String(suppliedStrength).trim();
+    }
+
+    const match = String(rawName).match(
+      /(\d+(?:\.\d+)?\s*(?:mg|g|mcg|ml|iu|%))/i
+    );
+
+    return match ? match[1] : '';
+  }
+
+  /**
+   * Clean medicine name for elderly-friendly display.
+   *
+   * @param {string} raw
+   * @returns {string}
    */
   function formatMedicineName(raw) {
-    if (!raw) return 'Medicine';
-    // Remove redundant technical SCT suffixes if present
-    let clean = raw.replace(/\(product\)/gi, '').trim();
-    // Capitalize first letter of words
+    if (!raw) {
+      return 'Medicine';
+    }
+
+    let clean = String(raw)
+      .replace(/\(product\)/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!clean) {
+      return 'Medicine';
+    }
+
     return clean.charAt(0).toUpperCase() + clean.slice(1);
   }
 
+  /**
+   * Attempt to extract brand name from medicine name.
+   *
+   * @param {string} raw
+   * @returns {string}
+   */
   function extractBrand(raw) {
-    const parts = raw.split('(');
-    if (parts.length > 1) {
-      return parts[0].trim();
+    if (!raw) {
+      return 'Brand';
     }
-    return raw.split(' ')[0] || 'Brand';
+
+    const clean = String(raw).trim();
+
+    const beforeParenthesis = clean.split('(')[0].trim();
+
+    if (beforeParenthesis) {
+      const words = beforeParenthesis.split(/\s+/);
+
+      // Keep common brand + strength combinations.
+      if (
+        words.length >= 2 &&
+        /\d/.test(words[words.length - 1])
+      ) {
+        return beforeParenthesis;
+      }
+
+      return beforeParenthesis;
+    }
+
+    return clean.split(/\s+/)[0] || 'Brand';
   }
 
+  /**
+   * Attempt to extract generic name.
+   *
+   * @param {string} raw
+   * @returns {string}
+   */
   function extractGeneric(raw) {
-    const match = raw.match(/\(([^)]+)\)/);
+    if (!raw) {
+      return 'Not specified';
+    }
+
+    const match = String(raw).match(/\(([^)]+)\)/);
+
     if (match && match[1]) {
       return match[1].trim();
     }
-    return raw;
+
+    return String(raw).trim();
   }
 
   /**
-   * Classify medicine category and icon
+   * Classify medicine into a broad display category.
+   *
+   * This is ONLY a UI classification.
+   * It is not a medical diagnosis.
+   *
+   * @param {string} name
+   * @param {string} generic
+   * @returns {{icon: string, category: string}}
    */
   function classifyMedicine(name, generic) {
-    const combined = `${name} ${generic}`.toLowerCase();
+    const combined =
+      `${name || ''} ${generic || ''}`.toLowerCase();
 
-    if (combined.includes('paracetamol') || combined.includes('acetaminophen') || combined.includes('dolo') || combined.includes('crocin') || combined.includes('ibuprofen') || combined.includes('pain') || combined.includes('fever')) {
-      return { icon: '💊', category: 'Pain Relief / Fever Reducer' };
+    if (
+      combined.includes('paracetamol') ||
+      combined.includes('acetaminophen') ||
+      combined.includes('dolo') ||
+      combined.includes('crocin') ||
+      combined.includes('ibuprofen') ||
+      combined.includes('pain') ||
+      combined.includes('fever')
+    ) {
+      return {
+        icon: '💊',
+        category: 'Pain Relief / Fever Reducer'
+      };
     }
-    if (combined.includes('cetirizine') || combined.includes('levocetirizine') || combined.includes('zyrtec') || combined.includes('allegra') || combined.includes('allergy') || combined.includes('histamine')) {
-      return { icon: '🌿', category: 'Antihistamine / Allergy Relief' };
+
+    if (
+      combined.includes('cetirizine') ||
+      combined.includes('levocetirizine') ||
+      combined.includes('zyrtec') ||
+      combined.includes('allegra') ||
+      combined.includes('fexofenadine') ||
+      combined.includes('allergy') ||
+      combined.includes('histamine')
+    ) {
+      return {
+        icon: '🌿',
+        category: 'Antihistamine / Allergy Relief'
+      };
     }
-    if (combined.includes('amlo') || combined.includes('amlodipine') || combined.includes('telmisartan') || combined.includes('losartan') || combined.includes('atenolol') || combined.includes('blood pressure') || combined.includes('hypertension')) {
-      return { icon: '❤️', category: 'Cardiovascular / Blood Pressure' };
+
+    if (
+      combined.includes('amlo') ||
+      combined.includes('amlodipine') ||
+      combined.includes('telmisartan') ||
+      combined.includes('losartan') ||
+      combined.includes('atenolol') ||
+      combined.includes('blood pressure') ||
+      combined.includes('hypertension')
+    ) {
+      return {
+        icon: '❤️',
+        category: 'Cardiovascular / Blood Pressure'
+      };
     }
-    if (combined.includes('panto') || combined.includes('pantoprazole') || combined.includes('omeprazole') || combined.includes('rabeprazole') || combined.includes('ranitidine') || combined.includes('antacid') || combined.includes('acidity') || combined.includes('gas')) {
-      return { icon: '🟡', category: 'Proton Pump Inhibitor / Acidity Relief' };
+
+    if (
+      combined.includes('panto') ||
+      combined.includes('pantoprazole') ||
+      combined.includes('omeprazole') ||
+      combined.includes('rabeprazole') ||
+      combined.includes('esomeprazole') ||
+      combined.includes('ranitidine') ||
+      combined.includes('antacid') ||
+      combined.includes('acidity') ||
+      combined.includes('gas')
+    ) {
+      return {
+        icon: '🟡',
+        category: 'Acidity / Stomach Relief'
+      };
     }
-    if (combined.includes('metformin') || combined.includes('glycomet') || combined.includes('glimepiride') || combined.includes('vildagliptin') || combined.includes('insulin') || combined.includes('diabetes') || combined.includes('sugar')) {
-      return { icon: '🔵', category: 'Anti-Diabetic / Blood Sugar Control' };
+
+    if (
+      combined.includes('metformin') ||
+      combined.includes('glycomet') ||
+      combined.includes('glimepiride') ||
+      combined.includes('vildagliptin') ||
+      combined.includes('sitagliptin') ||
+      combined.includes('insulin') ||
+      combined.includes('diabetes') ||
+      combined.includes('sugar')
+    ) {
+      return {
+        icon: '🔵',
+        category: 'Anti-Diabetic / Blood Sugar Control'
+      };
     }
-    if (combined.includes('amoxi') || combined.includes('amoxicillin') || combined.includes('azithro') || combined.includes('azithromycin') || combined.includes('cipro') || combined.includes('cefixime') || combined.includes('antibiotic')) {
-      return { icon: '💉', category: 'Antibiotic / Infection Treatment' };
+
+    if (
+      combined.includes('amoxi') ||
+      combined.includes('amoxicillin') ||
+      combined.includes('azithro') ||
+      combined.includes('azithromycin') ||
+      combined.includes('cipro') ||
+      combined.includes('cefixime') ||
+      combined.includes('antibiotic')
+    ) {
+      return {
+        icon: '💉',
+        category: 'Antibiotic / Infection Treatment'
+      };
     }
-    if (combined.includes('atorvastatin') || combined.includes('rosuvastatin') || combined.includes('cholesterol') || combined.includes('statin')) {
-      return { icon: '🩸', category: 'Lipid Lowering / Cholesterol' };
+
+    if (
+      combined.includes('atorvastatin') ||
+      combined.includes('rosuvastatin') ||
+      combined.includes('cholesterol') ||
+      combined.includes('statin')
+    ) {
+      return {
+        icon: '🩸',
+        category: 'Lipid Lowering / Cholesterol'
+      };
     }
-    if (combined.includes('cough') || combined.includes('dextromethorphan') || combined.includes('ambroxol') || combined.includes('syrup')) {
-      return { icon: '🧪', category: 'Respiratory / Cough & Cold' };
+
+    if (
+      combined.includes('cough') ||
+      combined.includes('dextromethorphan') ||
+      combined.includes('ambroxol') ||
+      combined.includes('guaifenesin') ||
+      combined.includes('syrup')
+    ) {
+      return {
+        icon: '🧪',
+        category: 'Respiratory / Cough & Cold'
+      };
     }
-    return { icon: '💊', category: 'Prescription / General Medicine' };
+
+    return {
+      icon: '💊',
+      category: 'Prescription / General Medicine'
+    };
   }
 
   /**
-   * Build verified factual instructions across 6 languages adhering strictly to safety boundaries
-   * NEVER generates personalized dosage from age/weight/symptoms.
+   * Build factual instructions in six supported languages.
+   *
+   * IMPORTANT:
+   * This function intentionally does not calculate
+   * personalized dosage from age, weight, symptoms,
+   * medical history, or other patient-specific data.
    */
   function buildFactualInstructions(name, generic, brand) {
-    const combined = `${name} ${generic} ${brand}`.toLowerCase();
+    const displayName = formatMedicineName(name);
 
-    // 1. Pain / Fever (Paracetamol, Ibuprofen, etc.)
-    if (combined.includes('paracetamol') || combined.includes('acetaminophen') || combined.includes('dolo') || combined.includes('crocin')) {
+    const combined =
+      `${name || ''} ${generic || ''} ${brand || ''}`.toLowerCase();
+
+    /*
+     * ---------------------------------------------------------
+     * 1. PARACETAMOL / ACETAMINOPHEN
+     * ---------------------------------------------------------
+     */
+    if (
+      combined.includes('paracetamol') ||
+      combined.includes('acetaminophen') ||
+      combined.includes('dolo') ||
+      combined.includes('crocin')
+    ) {
       return {
         en: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'Pain Relief / Fever Reducer',
-          when: 'Follow the schedule prescribed by your doctor or pharmacist. Typically taken as needed with sufficient interval between doses. Do not exceed the maximum daily limit indicated on your prescription.',
-          food: 'Can be taken with or without food. Taking with a glass of water or after a light meal may help prevent mild stomach discomfort.',
-          notes: 'Do not take together with other medicines containing paracetamol or acetaminophen to prevent accidental duplication.',
-          important: 'Keep in a cool, dry place away from children. If fever or pain persists after 3 days, consult your physician.'
+          when:
+            'Follow the timing and dosage prescribed by your doctor or pharmacist. Do not exceed the maximum daily amount stated on your prescription or package.',
+          food:
+            'Can generally be taken with or without food. Take with water.',
+          notes:
+            'Do not combine with another medicine containing paracetamol or acetaminophen unless a healthcare professional has advised you to do so.',
+          important:
+            'Keep in a cool, dry place away from children. If pain or fever persists, consult a healthcare professional.'
         },
+
         ta: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'வலி நிவாரணி / காய்ச்சல் குறைக்கும் மருந்து',
-          when: 'உங்கள் மருத்துவர் அல்லது மருந்தாளுநர் குறிப்பிட்ட அட்டவணையைப் பின்பற்றவும். பரிந்துரைக்கப்பட்ட தினசரி அளவைத் தாண்ட வேண்டாம்.',
-          food: 'உணவுடனும் அல்லது உணவு இன்றியும் எடுத்துக்கொள்ளலாம். ஒரு டம்ளர் தண்ணீருடன் அல்லது லேசான உணவுக்குப் பிறகு உட்கொள்வது நல்லது.',
-          notes: 'பாராசிட்டமால் கலந்த பிற மருந்துகளுடன் சேர்த்து ஒரே நேரத்தில் உட்கொள்ள வேண்டாம்.',
-          important: 'குழந்தைகளின் கைக்கு எட்டாத குளிர்ந்த, உலர்ந்த இடத்தில் வைக்கவும். 3 நாட்களுக்கு மேல் காய்ச்சல் தொடர்ந்தால் மருத்துவரை அணுகவும்.'
+          when:
+            'மருத்துவர் அல்லது மருந்தாளுநர் கூறிய நேரம் மற்றும் அளவைப் பின்பற்றவும். பரிந்துரைக்கப்பட்ட அதிகபட்ச தினசரி அளவைத் தாண்ட வேண்டாம்.',
+          food:
+            'பொதுவாக உணவுடனும் அல்லது உணவு இன்றியும் எடுத்துக்கொள்ளலாம். தண்ணீருடன் எடுத்துக்கொள்ளவும்.',
+          notes:
+            'பாராசிட்டமால் அல்லது அசிட்டமினோஃபென் உள்ள மற்ற மருந்துகளை மருத்துவ ஆலோசனை இல்லாமல் சேர்த்து எடுத்துக்கொள்ள வேண்டாம்.',
+          important:
+            'குழந்தைகளுக்கு எட்டாத குளிர்ந்த, உலர்ந்த இடத்தில் வைக்கவும். வலி அல்லது காய்ச்சல் தொடர்ந்தால் மருத்துவரை அணுகவும்.'
         },
+
         hi: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'दर्द निवारक / बुखार कम करने वाली दवा',
-          when: 'अपने डॉक्टर या फार्मासिस्ट द्वारा बताए गए समय का पालन करें। निर्धारित दैनिक सीमा से अधिक न लें।',
-          food: 'भोजन के साथ या बिना भी ले सकते हैं। पानी के साथ या हल्के भोजन के बाद लेना बेहतर होता है।',
-          notes: 'पैरासिटामोल युक्त अन्य दवाओं के साथ एक ही समय पर न लें।',
-          important: 'बच्चों की पहुंच से दूर ठंडी व सूखी जगह पर रखें। यदि बुखार 3 दिनों से अधिक रहता है तो डॉक्टर से परामर्श करें।'
+          when:
+            'डॉक्टर या फार्मासिस्ट द्वारा बताए गए समय और खुराक का पालन करें। निर्धारित अधिकतम दैनिक मात्रा से अधिक न लें।',
+          food:
+            'आमतौर पर भोजन के साथ या बिना लिया जा सकता है। पानी के साथ लें।',
+          notes:
+            'पैरासिटामोल या एसीटामिनोफेन वाली दूसरी दवा बिना डॉक्टर की सलाह के साथ न लें।',
+          important:
+            'बच्चों की पहुंच से दूर ठंडी और सूखी जगह पर रखें। दर्द या बुखार बना रहे तो डॉक्टर से संपर्क करें।'
         },
+
         te: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'నొప్పి నివారిణి / జ్వర నివారిణి',
-          when: 'మీ డాక్టర్ లేదా ఫార్మాసిస్ట్ సూచించిన సమయాన్ని ఖచ్చితంగా అనుసరించండి. సిఫారసు చేసిన పరిమితిని మించకండి.',
-          food: 'ఆహారంతో లేదా ఆహారం లేకుండా తీసుకోవచ్చు. తగినంత నీటితో తీసుకోవడం మంచిది.',
-          notes: 'పారాసిటమాల్ కలిగిన ఇతర మందులతో కలిపి ఒకేసారి తీసుకోకండి.',
-          important: 'పిల్లలకు దూరంగా చల్లని, పొడి ప్రదేశంలో ఉంచండి. 3 రోజుల తర్వాత కూడా జ్వరం తగ్గకపోతే వైద్యుడిని సంప్రదించండి.'
+          when:
+            'డాక్టర్ లేదా ఫార్మసిస్ట్ సూచించిన సమయం మరియు మోతాదును అనుసరించండి. సూచించిన గరిష్ట రోజువారీ మోతాదును మించకండి.',
+          food:
+            'సాధారణంగా ఆహారంతో లేదా ఆహారం లేకుండా తీసుకోవచ్చు. నీటితో తీసుకోండి.',
+          notes:
+            'పారాసిటమాల్ లేదా ఎసిటామినోఫెన్ ఉన్న ఇతర మందులను వైద్య సలహా లేకుండా కలిపి తీసుకోకండి.',
+          important:
+            'పిల్లలకు దూరంగా చల్లని, పొడి ప్రదేశంలో ఉంచండి. నొప్పి లేదా జ్వరం కొనసాగితే వైద్యుడిని సంప్రదించండి.'
         },
+
         kn: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'ನೋವು ನಿವಾರಕ / ಜ್ವರ ಕಡಿಮೆ ಮಾಡುವ ಔಷಧ',
-          when: 'ನಿಮ್ಮ ವೈದ್ಯರು ಅಥವಾ ಔಷಧಿಕಾರರು ಸೂಚಿಸಿದ ವೇಳಾಪಟ್ಟಿಯನ್ನು ಅನುಸರಿಸಿ. ನಿಗದಿತ ಮಿತಿಯನ್ನು ಮೀರಬೇಡಿ.',
-          food: 'ಆಹಾರದೊಂದಿಗೆ ಅಥವಾ ಇಲ್ಲದೆ ತೆಗೆದುಕೊಳ್ಳಬಹುದು. ಸಾಕಷ್ಟು ನೀರಿನೊಂದಿಗೆ ತೆಗೆದುಕೊಳ್ಳಿ.',
-          notes: 'ಪ್ಯಾರಸಿಟಮಾಲ್ ಹೊಂದಿರುವ ಇತರ ಔಷಧಿಗಳೊಂದಿಗೆ ಒಟ್ಟಿಗೆ ತೆಗೆದುಕೊಳ್ಳಬೇಡಿ.',
-          important: 'ಮಕ್ಕಳ ಕೈಗೆ ಸಿಗದಂತೆ ತಂಪಾದ, ಒಣ ಸ್ಥಳದಲ್ಲಿ ಇರಿಸಿ.'
+          when:
+            'ವೈದ್ಯರು ಅಥವಾ ಔಷಧಿಕಾರರು ಸೂಚಿಸಿದ ಸಮಯ ಮತ್ತು ಪ್ರಮಾಣವನ್ನು ಅನುಸರಿಸಿ. ಸೂಚಿಸಿದ ಗರಿಷ್ಠ ದೈನಂದಿನ ಪ್ರಮಾಣವನ್ನು ಮೀರಬೇಡಿ.',
+          food:
+            'ಸಾಮಾನ್ಯವಾಗಿ ಆಹಾರದೊಂದಿಗೆ ಅಥವಾ ಆಹಾರವಿಲ್ಲದೆ ತೆಗೆದುಕೊಳ್ಳಬಹುದು. ನೀರಿನೊಂದಿಗೆ ತೆಗೆದುಕೊಳ್ಳಿ.',
+          notes:
+            'ವೈದ್ಯರ ಸಲಹೆಯಿಲ್ಲದೆ ಪ್ಯಾರಸಿಟಮಾಲ್ ಹೊಂದಿರುವ ಇತರ ಔಷಧಿಗಳೊಂದಿಗೆ ಸೇರಿಸಿ ತೆಗೆದುಕೊಳ್ಳಬೇಡಿ.',
+          important:
+            'ಮಕ್ಕಳ ಕೈಗೆ ಸಿಗದಂತೆ ತಂಪಾದ ಮತ್ತು ಒಣ ಸ್ಥಳದಲ್ಲಿ ಇರಿಸಿ. ನೋವು ಅಥವಾ ಜ್ವರ ಮುಂದುವರಿದರೆ ವೈದ್ಯರನ್ನು ಸಂಪರ್ಕಿಸಿ.'
         },
+
         ml: {
-          medicine: formatMedicineName(name),
-          category: 'വേദന സംഹാരി / പനി കുറക്കുന്ന മരുന്ന്',
-          when: 'ഡോക്ടർ അല്ലെങ്കിൽ ഫാർമസിസ്റ്റ് നിർദ്ദേശിച്ച സമയക്രമം കൃത്യമായി പാലിക്കുക. നിശ്ചിത പരിധി കവിയരുത്.',
-          food: 'ഭക്ഷണത്തോടൊപ്പം അല്ലെങ്കിൽ അല്ലാതെ കഴിക്കാം. ആവശ്യത്തിന് വെള്ളത്തോടൊപ്പം കഴിക്കുക.',
-          notes: 'പാരസെറ്റമോൾ അടങ്ങിയ മറ്റ് മരുന്നുകളോടൊപ്പം കഴിക്കരുത്.',
-          important: 'കുട്ടികൾക്ക് ലഭിക്കാത്ത തണുപ്പുള്ള സ്ഥലത്ത് സൂക്ഷിക്കുക. പനി മാറിയില്ലെങ്കിൽ ഡോക്ടറെ കാണുക.'
+          medicine: displayName,
+          category: 'വേദന സംഹാരി / പനി കുറയ്ക്കുന്ന മരുന്ന്',
+          when:
+            'ഡോക്ടർ അല്ലെങ്കിൽ ഫാർമസിസ്റ്റ് നിർദ്ദേശിച്ച സമയവും അളവും പാലിക്കുക. നിർദ്ദേശിച്ച പരമാവധി ദിവസേനയുള്ള അളവ് കവിയരുത്.',
+          food:
+            'സാധാരണയായി ഭക്ഷണത്തോടൊപ്പം അല്ലെങ്കിൽ അല്ലാതെയും കഴിക്കാം. വെള്ളത്തോടൊപ്പം കഴിക്കുക.',
+          notes:
+            'ഡോക്ടറുടെ നിർദ്ദേശമില്ലാതെ പാരസെറ്റമോൾ അടങ്ങിയ മറ്റ് മരുന്നുകളോടൊപ്പം കഴിക്കരുത്.',
+          important:
+            'കുട്ടികൾക്ക് ലഭിക്കാത്ത തണുത്തതും ഉണങ്ങിയതുമായ സ്ഥലത്ത് സൂക്ഷിക്കുക. വേദനയോ പനിയോ തുടരുകയാണെങ്കിൽ ഡോക്ടറെ കാണുക.'
         }
       };
     }
 
-    // 2. Allergy (Cetirizine, Levocetirizine, etc.)
-    if (combined.includes('cetirizine') || combined.includes('levocetirizine') || combined.includes('allergy') || combined.includes('zyrtec')) {
+    /*
+     * ---------------------------------------------------------
+     * 2. CETIRIZINE / ALLERGY MEDICINES
+     * ---------------------------------------------------------
+     */
+    if (
+      combined.includes('cetirizine') ||
+      combined.includes('levocetirizine') ||
+      combined.includes('zyrtec') ||
+      combined.includes('allergy')
+    ) {
       return {
         en: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'Antihistamine / Allergy Relief',
-          when: 'Take once daily as directed by your doctor, usually in the evening or bedtime.',
-          food: 'Can be taken with or without food. Swallow with water.',
-          notes: 'May cause mild drowsiness in some individuals. Exercise caution when driving or operating machinery.',
-          important: 'Keep away from children and direct sunlight. Do not combine with alcohol.'
+          when:
+            'Take according to the schedule prescribed by your doctor or pharmacist.',
+          food:
+            'Can generally be taken with or without food. Swallow with water.',
+          notes:
+            'May cause drowsiness in some people. Use caution when driving or operating machinery.',
+          important:
+            'Keep away from children. Avoid alcohol if it increases drowsiness.'
         },
+
         ta: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'ஒவ்வாமை நிவாரண மருந்து',
-          when: 'மருத்துவர் கூறியபடி தினமும் ஒரு முறை, வழக்கமாக மாலையில் அல்லது தூங்குவதற்கு முன் எடுக்கவும்.',
-          food: 'உணவுடனும் அல்லது உணவு இன்றியும் உட்கொள்ளலாம். தண்ணீருடன் விழுங்கவும்.',
-          notes: 'இந்த மருந்து சிலருக்கு லேசான தூக்கத்தை ஏற்படுத்தலாம். வாகனம் ஓட்டுவதில் கவனம் தேவை.',
-          important: 'குழந்தைகளுக்கு எட்டாத இடத்தில், நேரடி சூரிய ஒளி படாமல் வைக்கவும். மது அருந்துவதைத் தவிர்க்கவும்.'
+          when:
+            'மருத்துவர் அல்லது மருந்தாளுநர் கூறிய அட்டவணைப்படி எடுத்துக்கொள்ளவும்.',
+          food:
+            'உணவுடனும் அல்லது உணவு இன்றியும் எடுத்துக்கொள்ளலாம். தண்ணீருடன் விழுங்கவும்.',
+          notes:
+            'சிலருக்கு தூக்கம் ஏற்படலாம். வாகனம் ஓட்டும்போது கவனமாக இருக்கவும்.',
+          important:
+            'குழந்தைகளுக்கு எட்டாத இடத்தில் வைக்கவும். தூக்கம் அதிகரித்தால் மதுவைத் தவிர்க்கவும்.'
         },
+
         hi: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'एंटीहिस्टामाइन / एलर्जी राहत',
-          when: 'डॉक्टर के निर्देशानुसार दिन में एक बार, आमतौर पर शाम या सोने के समय लें।',
-          food: 'भोजन के साथ या बिना भी ले सकते हैं। पानी के साथ निगलें।',
-          notes: 'हल्की नींद आ सकती है। वाहन चलाते समय सावधानी बरतें।',
-          important: 'बच्चों की पहुंच से दूर रखें और धूप से बचाएं।'
+          when:
+            'डॉक्टर या फार्मासिस्ट द्वारा बताए गए समय के अनुसार लें।',
+          food:
+            'भोजन के साथ या बिना लिया जा सकता है। पानी के साथ निगलें।',
+          notes:
+            'कुछ लोगों को नींद आ सकती है। वाहन चलाते समय सावधानी बरतें।',
+          important:
+            'बच्चों की पहुंच से दूर रखें। नींद बढ़ने पर शराब से बचें।'
         },
+
         te: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'అలెర్జీ నివారిణి',
-          when: 'డాక్టర్ సూచించినట్లు రోజుకు ఒకసారి, సాధారణంగా సాయంత్రం లేదా పడుకునే ముందు తీసుకోండి.',
-          food: 'ఆహారంతో లేదా లేకుండా తీసుకోవచ్చు.',
-          notes: 'కొంతమందికి నిద్రను కలిగించవచ్చు. వాహనం నడిపేటప్పుడు జాగ్రత్త వహించండి.',
-          important: 'పిల్లలకు అందుబాటులో లేకుండా ఉంచండి.'
+          when:
+            'డాక్టర్ లేదా ఫార్మసిస్ట్ సూచించిన సమయాన్ని అనుసరించండి.',
+          food:
+            'ఆహారంతో లేదా ఆహారం లేకుండా తీసుకోవచ్చు. నీటితో మింగండి.',
+          notes:
+            'కొంతమందికి నిద్ర రావచ్చు. వాహనం నడిపేటప్పుడు జాగ్రత్తగా ఉండండి.',
+          important:
+            'పిల్లలకు అందకుండా ఉంచండి.'
         },
+
         kn: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'ಅಲರ್ಜಿ ನಿವಾರಕ ಔಷಧ',
-          when: 'ವೈದ್ಯರ ಸಲಹೆಯಂತೆ ದಿನಕ್ಕೊಮ್ಮೆ, ಸಾಮಾನ್ಯವಾಗಿ ಸಂಜೆ ತೆಗೆದುಕೊಳ್ಳಿ.',
-          food: 'ಆಹಾರದೊಂದಿಗೆ ಅಥವಾ ಇಲ್ಲದೆ ತೆಗೆದುಕೊಳ್ಳಬಹುದು.',
-          notes: 'ಸ್ವಲ್ಪ ನಿದ್ರಾವಸ್ಥೆ ತರಬಹುದು. ವಾಹನ ಚಾಲನೆ ಮಾಡುವಾಗ ಎಚ್ಚರವಿರಲಿ.',
-          important: 'ಮಕ್ಕಳ ಕೈಗೆ ಸಿಗದಂತೆ ಸುರಕ್ಷಿತವಾಗಿ ಇರಿಸಿ.'
+          when:
+            'ವೈದ್ಯರು ಅಥವಾ ಔಷಧಿಕಾರರು ಸೂಚಿಸಿದ ಸಮಯದಂತೆ ತೆಗೆದುಕೊಳ್ಳಿ.',
+          food:
+            'ಆಹಾರದೊಂದಿಗೆ ಅಥವಾ ಆಹಾರವಿಲ್ಲದೆ ತೆಗೆದುಕೊಳ್ಳಬಹುದು. ನೀರಿನೊಂದಿಗೆ ನುಂಗಿ.',
+          notes:
+            'ಕೆಲವರಿಗೆ ನಿದ್ರಾವಸ್ಥೆ ಉಂಟಾಗಬಹುದು. ವಾಹನ ಚಾಲನೆ ಮಾಡುವಾಗ ಎಚ್ಚರಿಕೆಯಿಂದಿರಿ.',
+          important:
+            'ಮಕ್ಕಳ ಕೈಗೆ ಸಿಗದಂತೆ ಇರಿಸಿ.'
         },
+
         ml: {
-          medicine: formatMedicineName(name),
-          category: 'അലർജി ഒഷൊ',
-          when: 'ഡോക്ടറുടെ നിർദ്ദേശപ്രകാരം ദിവസം ഒരു തവണ, സാധാരണയായി വൈകുന്നേരം കഴിക്കുക.',
-          food: 'ഭക്ഷണത്തോടൊപ്പം അല്ലെങ്കിൽ അല്ലാതെ കഴിക്കാം.',
-          notes: 'നേരിയ ഉറക്കം വരുത്തിയേക്കാം. വാഹനം ഓടിക്കുമ്പോൾ ശ്രദ്ധിക്കുക.',
-          important: 'കുട്ടികളിൽ നിന്ന് അകറ്റി സൂക്ഷിക്കുക.'
+          medicine: displayName,
+          category: 'അലർജി നിവാരണ മരുന്ന്',
+          when:
+            'ഡോക്ടർ അല്ലെങ്കിൽ ഫാർമസിസ്റ്റ് നിർദ്ദേശിച്ച സമയക്രമം പാലിക്കുക.',
+          food:
+            'ഭക്ഷണത്തോടൊപ്പം അല്ലെങ്കിൽ അല്ലാതെയും കഴിക്കാം. വെള്ളത്തോടൊപ്പം വിഴുങ്ങുക.',
+          notes:
+            'ചിലർക്ക് ഉറക്കം വരാം. വാഹനം ഓടിക്കുമ്പോൾ ശ്രദ്ധിക്കുക.',
+          important:
+            'കുട്ടികൾക്ക് ലഭിക്കാത്തിടത്ത് സൂക്ഷിക്കുക.'
         }
       };
     }
 
-    // 3. Blood Pressure / Cardiovascular (Amlodipine, Telmisartan, Losartan, etc.)
-    if (combined.includes('amlo') || combined.includes('amlodipine') || combined.includes('telmisartan') || combined.includes('losartan') || combined.includes('atenolol')) {
+    /*
+     * ---------------------------------------------------------
+     * 3. BLOOD PRESSURE / CARDIOVASCULAR
+     * ---------------------------------------------------------
+     */
+    if (
+      combined.includes('amlodipine') ||
+      combined.includes('amlo') ||
+      combined.includes('telmisartan') ||
+      combined.includes('losartan') ||
+      combined.includes('atenolol')
+    ) {
       return {
         en: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'Cardiovascular / Blood Pressure Control',
-          when: 'Take exactly at the same time every day as directed by your doctor. Do not stop or skip doses without consulting your doctor.',
-          food: 'Can be taken with or without food. Swallow whole with water.',
-          notes: 'Maintain regular blood pressure monitoring. Do not discontinue suddenly even if you feel completely healthy.',
-          important: 'Store at room temperature away from moisture. Consult doctor before taking any OTC pain relievers.'
+          when:
+            'Take exactly according to the schedule prescribed by your doctor. Do not stop the medicine on your own.',
+          food:
+            'Follow the food instructions provided with your specific medicine. Swallow with water.',
+          notes:
+            'Monitor blood pressure as advised by your healthcare professional.',
+          important:
+            'Do not suddenly stop prescribed blood-pressure medicine without medical advice.'
         },
+
         ta: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'இரத்த அழுத்தக் கட்டுப்பாட்டு மருந்து',
-          when: 'மருத்துவர் அறிவுறுத்தியபடி தினமும் ஒரே குறிப்பிட்ட நேரத்தில் எடுக்கவும். மருத்துவரிடம் கேட்காமல் மருந்தை நிறுத்தாதீர்கள்.',
-          food: 'உணவுடனும் அல்லது உணவு இன்றியும் உட்கொள்ளலாம். மாத்திரையை முழுதாக விழுங்கவும்.',
-          notes: 'இரத்த அழுத்தத்தைத் தொடர்ந்து பரிசோதிக்கவும். உடல்நலம் சீராக உணர்ந்தாலும் மருந்தை நிறுத்த வேண்டாம்.',
-          important: 'ஈரப்பதம் இல்லாத சாதாரண வெப்பநிலையில் சேமிக்கவும்.'
+          when:
+            'மருத்துவர் குறிப்பிட்ட அட்டவணைப்படி எடுத்துக்கொள்ளவும். மருத்துவரின் ஆலோசனை இல்லாமல் மருந்தை நிறுத்த வேண்டாம்.',
+          food:
+            'உங்கள் குறிப்பிட்ட மருந்துக்கான உணவு அறிவுறுத்தல்களைப் பின்பற்றவும். தண்ணீருடன் எடுத்துக்கொள்ளவும்.',
+          notes:
+            'மருத்துவர் கூறியபடி இரத்த அழுத்தத்தைத் தொடர்ந்து பரிசோதிக்கவும்.',
+          important:
+            'மருத்துவ ஆலோசனை இல்லாமல் இரத்த அழுத்த மருந்தை திடீரென நிறுத்த வேண்டாம்.'
         },
+
         hi: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'रक्तचाप नियंत्रण दवा',
-          when: 'डॉक्टर के निर्देशानुसार हर दिन एक ही समय पर लें। डॉक्टर की सलाह के बिना बंद न करें।',
-          food: 'भोजन के साथ या बिना ले सकते हैं। पानी के साथ पूरी गोली निगलें।',
-          notes: 'नियमित रूप से बीपी की जांच करते रहें। अचानक दवा बंद न करें।',
-          important: 'कमरे के तापमान पर नमी से दूर रखें।'
+          when:
+            'डॉक्टर द्वारा बताए गए समय के अनुसार लें। डॉक्टर की सलाह के बिना दवा बंद न करें।',
+          food:
+            'अपनी दवा के निर्देशों के अनुसार भोजन के संबंध में निर्देशों का पालन करें। पानी के साथ लें।',
+          notes:
+            'डॉक्टर की सलाह के अनुसार रक्तचाप की जांच करते रहें।',
+          important:
+            'डॉक्टर की सलाह के बिना दवा अचानक बंद न करें।'
         },
+
         te: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'రక్తపోటు నియంత్రణ మందు',
-          when: 'డాక్టర్ సూచించిన ప్రకారం ప్రతిరోజూ ఒకే సమయానికి తీసుకోండి. సలహా లేకుండా ఆపవద్దు.',
-          food: 'ఆహారంతో లేదా లేకుండా తీసుకోవచ్చు.',
-          notes: 'క్రమం తప్పకుండా రక్తపోటును తనిఖీ చేసుకోండి.',
-          important: 'తేమ లేని సాధారణ ఉష్ణోగ్రత వద్ద ఉంచండి.'
+          when:
+            'డాక్టర్ సూచించిన సమయానికి తీసుకోండి. వైద్య సలహా లేకుండా మందును ఆపవద్దు.',
+          food:
+            'మీ మందుకు సంబంధించిన ఆహార సూచనలను అనుసరించండి. నీటితో తీసుకోండి.',
+          notes:
+            'డాక్టర్ సూచించిన విధంగా రక్తపోటును తనిఖీ చేయండి.',
+          important:
+            'వైద్య సలహా లేకుండా మందును అకస్మాత్తుగా ఆపవద్దు.'
         },
+
         kn: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'ರಕ್ತದೊತ್ತಡ ನಿಯಂತ್ರಣ ಔಷಧ',
-          when: 'ವೈದ್ಯರ ಸಲಹೆಯಂತೆ ಪ್ರತಿದಿನ ಒಂದೇ ಸಮಯಕ್ಕೆ ತೆಗೆದುಕೊಳ್ಳಿ. ಇದ್ದಕ್ಕಿದ್ದಂತೆ ನಿಲ್ಲಿಸಬೇಡಿ.',
-          food: 'ಆಹಾರದೊಂದಿಗೆ ಅಥವಾ ಇಲ್ಲದೆ ತೆಗೆದುಕೊಳ್ಳಬಹುದು.',
-          notes: 'ನಿಯಮಿತವಾಗಿ ರಕ್ತದೊತ್ತಡವನ್ನು ಪರೀಕ್ಷಿಸುತ್ತಿರಿ.',
-          important: 'ತೇವಾಂಶವಿಲ್ಲದ ಸ್ಥಳದಲ್ಲಿ ಸಂಗ್ರಹಿಸಿ.'
+          when:
+            'ವೈದ್ಯರು ಸೂಚಿಸಿದ ಸಮಯದಂತೆ ತೆಗೆದುಕೊಳ್ಳಿ. ವೈದ್ಯರ ಸಲಹೆಯಿಲ್ಲದೆ ನಿಲ್ಲಿಸಬೇಡಿ.',
+          food:
+            'ನಿಮ್ಮ ಔಷಧಿಗೆ ನೀಡಿರುವ ಆಹಾರ ಸಂಬಂಧಿತ ಸೂಚನೆಗಳನ್ನು ಅನುಸರಿಸಿ. ನೀರಿನೊಂದಿಗೆ ತೆಗೆದುಕೊಳ್ಳಿ.',
+          notes:
+            'ವೈದ್ಯರ ಸಲಹೆಯಂತೆ ರಕ್ತದೊತ್ತಡವನ್ನು ಪರೀಕ್ಷಿಸುತ್ತಿರಿ.',
+          important:
+            'ವೈದ್ಯರ ಸಲಹೆಯಿಲ್ಲದೆ ಔಷಧಿಯನ್ನು ಹಠಾತ್ ನಿಲ್ಲಿಸಬೇಡಿ.'
         },
+
         ml: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'രക്തസമ്മർദ്ദ നിയന്ത്രണ മരുന്ന്',
-          when: 'ഡോക്ടറുടെ നിർദ്ദേശപ്രകാരം ദിവസവും ഒരേ സമയത്ത് കഴിക്കുക. സ്വയം നിർത്തരുത്.',
-          food: 'ഭക്ഷണത്തോടൊപ്പം അല്ലെങ്കിൽ അല്ലാതെ കഴിക്കാം.',
-          notes: 'രക്തസമ്മർദ്ദം പതിവായി പരിശോധിക്കുക.',
-          important: 'ഈർപ്പമില്ലാത്ത സാധാരണ താപനിലയിൽ സൂക്ഷിക്കുക.'
+          when:
+            'ഡോക്ടർ നിർദ്ദേശിച്ച സമയക്രമം പാലിക്കുക. ഡോക്ടറുടെ നിർദ്ദേശമില്ലാതെ മരുന്ന് നിർത്തരുത്.',
+          food:
+            'നിങ്ങളുടെ മരുന്നിനുള്ള ഭക്ഷണ നിർദ്ദേശങ്ങൾ പാലിക്കുക. വെള്ളത്തോടൊപ്പം കഴിക്കുക.',
+          notes:
+            'ഡോക്ടറുടെ നിർദ്ദേശപ്രകാരം രക്തസമ്മർദ്ദം പരിശോധിക്കുക.',
+          important:
+            'ഡോക്ടറുടെ നിർദ്ദേശമില്ലാതെ മരുന്ന് പെട്ടെന്ന് നിർത്തരുത്.'
         }
       };
     }
 
-    // 4. Acidity / Antacid (Pantoprazole, Omeprazole, Rabeprazole, etc.)
-    if (combined.includes('panto') || combined.includes('pantoprazole') || combined.includes('omeprazole') || combined.includes('rabeprazole')) {
+    /*
+     * ---------------------------------------------------------
+     * 4. ACIDITY / PANTOPRAZOLE / OMEPRAZOLE
+     * ---------------------------------------------------------
+     */
+    if (
+      combined.includes('pantoprazole') ||
+      combined.includes('panto') ||
+      combined.includes('omeprazole') ||
+      combined.includes('rabeprazole') ||
+      combined.includes('esomeprazole')
+    ) {
       return {
         en: {
-          medicine: formatMedicineName(name),
-          category: 'Proton Pump Inhibitor / Acidity Relief',
-          when: 'Take 30 to 60 minutes before your first meal (breakfast), or as instructed by your doctor. Take at the same time each morning.',
-          food: 'Take on an empty stomach with a full glass of water. Do not crush or chew the tablet.',
-          notes: 'Swallow whole to preserve enteric coating. Continue the course prescribed by your physician.',
-          important: 'Store in a cool, dry place. If symptoms persist beyond two weeks, consult your doctor.'
+          medicine: displayName,
+          category: 'Acidity / Stomach Relief',
+          when:
+            'Follow the timing prescribed by your doctor or pharmacist. These medicines are commonly taken before food when specifically instructed.',
+          food:
+            'Follow the instructions on your medicine label. Swallow the tablet or capsule as directed and do not crush or chew an enteric-coated form unless instructed.',
+          notes:
+            'Take consistently according to your prescription.',
+          important:
+            'If acidity or stomach symptoms continue despite treatment, consult your doctor.'
         },
+
         ta: {
-          medicine: formatMedicineName(name),
-          category: 'அமிலத்தன்மை / நெஞ்செரிச்சல் நிவாரண மருந்து',
-          when: 'காலை உணவிற்கு 30 முதல் 60 நிமிடங்களுக்கு முன், அல்லது மருத்துவர் கூறியபடி வெறும் வயிற்றில் எடுக்கவும்.',
-          food: 'வெறும் வயிற்றில் ஒரு டம்ளர் தண்ணீருடன் முழுதாக விழுங்கவும். மாத்திரையை நசுக்கவோ மெல்லவோ கூடாது.',
-          notes: 'மாத்திரையை உடைக்காமல் முழுதாக விழுங்குவது அவசியம். பரிந்துரைக்கப்பட்ட நாட்களுக்குத் தொடர்ந்து எடுக்கவும்.',
-          important: 'குளிர்ந்த, உலர்ந்த இடத்தில் வைக்கவும். இரண்டு வாரங்களுக்கு மேல் தொந்தரவு நீடித்தால் மருத்துவரை அணுகவும்.'
+          medicine: displayName,
+          category: 'அமிலத்தன்மை / வயிற்று நிவாரண மருந்து',
+          when:
+            'மருத்துவர் அல்லது மருந்தாளுநர் கூறிய நேரத்தைப் பின்பற்றவும். குறிப்பிட்ட ஆலோசனை இருந்தால் உணவிற்கு முன் எடுத்துக்கொள்ளவும்.',
+          food:
+            'மருந்துச் சீட்டில் உள்ள அறிவுறுத்தல்களைப் பின்பற்றவும். மருத்துவர் கூறியபடி மாத்திரை அல்லது கேப்ஸ்யூலை விழுங்கவும்.',
+          notes:
+            'மருத்துவர் பரிந்துரைத்தபடி தொடர்ந்து எடுத்துக்கொள்ளவும்.',
+          important:
+            'சிகிச்சைக்குப் பிறகும் வயிற்று எரிச்சல் அல்லது அமிலத்தன்மை தொடர்ந்தால் மருத்துவரை அணுகவும்.'
         },
+
         hi: {
-          medicine: formatMedicineName(name),
-          category: 'एसिडिटी एवं पेट की जलन से राहत',
-          when: 'सुबह नाश्ते से 30 से 60 मिनट पहले या डॉक्टर के निर्देशानुसार खाली पेट लें।',
-          food: 'खाली पेट पानी के साथ पूरी गोली निगलें। गोली को चबाएं या तोड़ें नहीं।',
-          notes: 'गोली को पूरा निगलना जरूरी है। निर्धारित दिनों तक कोर्स पूरा करें।',
-          important: 'ठंडी व सूखी जगह पर रखें।'
+          medicine: displayName,
+          category: 'एसिडिटी / पेट से राहत',
+          when:
+            'डॉक्टर या फार्मासिस्ट द्वारा बताए गए समय का पालन करें। यदि निर्देश दिया गया हो तो भोजन से पहले लें।',
+          food:
+            'दवा के लेबल पर दिए निर्देशों का पालन करें। डॉक्टर के निर्देश के अनुसार गोली या कैप्सूल निगलें।',
+          notes:
+            'प्रिस्क्रिप्शन के अनुसार नियमित रूप से लें।',
+          important:
+            'इलाज के बावजूद पेट की समस्या बनी रहे तो डॉक्टर से संपर्क करें।'
         },
+
         te: {
-          medicine: formatMedicineName(name),
-          category: 'యాసిడ్ / గ్యాస్ నివారిణి',
-          when: 'ఉదయం అల్పాహారానికి 30 నుండి 60 నిమిషాల ముందు ఖాళీ కడుపుతో తీసుకోండి.',
-          food: 'ఖాళీ కడుపుతో ఒక గ్లాసు నీటితో మింగండి. నమలవద్దు లేదా విరవవద్దు.',
-          notes: 'మాత్రను మొత్తంగా మింగడం ముఖ്യം.',
-          important: 'చల్లని, పొడి ప్రదేశంలో నిల్వ చేయండి.'
+          medicine: displayName,
+          category: 'ఆమ్లత్వం / కడుపు ఉపశమనం',
+          when:
+            'డాక్టర్ లేదా ఫార్మసిస్ట్ సూచించిన సమయాన్ని అనుసరించండి. సూచించినట్లయితే భోజనానికి ముందు తీసుకోండి.',
+          food:
+            'మందు లేబుల్‌పై ఉన్న సూచనలను అనుసరించండి. సూచించిన విధంగా మాత్రను లేదా క్యాప్సూల్‌ను మింగండి.',
+          notes:
+            'డాక్టర్ సూచించిన విధంగా క్రమం తప్పకుండా తీసుకోండి.',
+          important:
+            'చికిత్స తర్వాత కూడా కడుపు సమస్య కొనసాగితే డాక్టర్‌ను సంప్రదించండి.'
         },
+
         kn: {
-          medicine: formatMedicineName(name),
-          category: 'ಆಮ್ಲೀಯತೆ ಮತ್ತು ಗ್ಯಾಸ್ ನಿವಾರಕ',
-          when: 'ಬೆಳಗಿನ ಉಪಾಹಾರಕ್ಕೆ 30 ರಿಂದ 60 ನಿಮಿಷಗಳ ಮೊದಲು ಖಾಲಿ ಹೊಟ್ಟೆಯಲ್ಲಿ ತೆಗೆದುಕೊಳ್ಳಿ.',
-          food: 'ಖಾಲಿ ಹೊಟ್ಟೆಯಲ್ಲಿ ನೀರಿನೊಂದಿಗೆ ನುಂಗಿ. ಪುಡಿ ಮಾಡಬೇಡಿ.',
-          notes: 'ಮಾತ್ರೆಯನ್ನು ಇಡಿಯಾಗಿ ನುಂಗುವುದು ಮುಖ್ಯ.',
-          important: 'ತಂಪಾದ, ಒಣ ಸ್ಥಳದಲ್ಲಿ ಇರಿಸಿ.'
+          medicine: displayName,
+          category: 'ಆಮ್ಲೀಯತೆ / ಹೊಟ್ಟೆ ಪರಿಹಾರ',
+          when:
+            'ವೈದ್ಯರು ಅಥವಾ ಔಷಧಿಕಾರರು ಸೂಚಿಸಿದ ಸಮಯವನ್ನು ಅನುಸರಿಸಿ. ಸೂಚಿಸಿದರೆ ಆಹಾರಕ್ಕಿಂತ ಮೊದಲು ತೆಗೆದುಕೊಳ್ಳಿ.',
+          food:
+            'ಔಷಧಿಯ ಲೇಬಲ್‌ನಲ್ಲಿರುವ ಸೂಚನೆಗಳನ್ನು ಅನುಸರಿಸಿ. ಸೂಚಿಸಿದಂತೆ ಮಾತ್ರೆಯನ್ನು ಅಥವಾ ಕ್ಯಾಪ್ಸುಲ್ ಅನ್ನು ನುಂಗಿ.',
+          notes:
+            'ವೈದ್ಯರು ಸೂಚಿಸಿದಂತೆ ನಿಯಮಿತವಾಗಿ ತೆಗೆದುಕೊಳ್ಳಿ.',
+          important:
+            'ಚಿಕಿತ್ಸೆಯ ನಂತರವೂ ಹೊಟ್ಟೆಯ ಸಮಸ್ಯೆ ಮುಂದುವರಿದರೆ ವೈದ್ಯರನ್ನು ಸಂಪರ್ಕಿಸಿ.'
         },
+
         ml: {
-          medicine: formatMedicineName(name),
-          category: 'അസിഡിറ്റി / ഗ്യാസ് ഒഷൊ',
-          when: 'പ്രഭാതഭക്ഷണത്തിന് 30 മുതൽ 60 മിനിറ്റ് മുമ്പ് വെറും വയറ്റിൽ കഴിക്കുക.',
-          food: 'വെറും വയറ്റിൽ വെള്ളത്തോടൊപ്പം മുഴുവനായി വിഴുങ്ങുക. ചവച്ചരക്കരുത്.',
-          notes: 'ഗുളിക പൊട്ടിക്കാതെ വിഴുങ്ങുക.',
-          important: 'തണുപ്പുള്ള, ഉണങ്ങിയ സ്ഥലത്ത് സൂക്ഷിക്കുക.'
+          medicine: displayName,
+          category: 'അസിഡിറ്റി / വയറിന് ആശ്വാസം',
+          when:
+            'ഡോക്ടർ അല്ലെങ്കിൽ ഫാർമസിസ്റ്റ് നിർദ്ദേശിച്ച സമയക്രമം പാലിക്കുക. നിർദ്ദേശിച്ചിട്ടുണ്ടെങ്കിൽ ഭക്ഷണത്തിന് മുമ്പ് കഴിക്കുക.',
+          food:
+            'മരുന്നിന്റെ ലേബലിലെ നിർദ്ദേശങ്ങൾ പാലിക്കുക. നിർദ്ദേശിച്ചതുപോലെ ഗുളികയോ ക്യാപ്സ്യൂളോ വിഴുങ്ങുക.',
+          notes:
+            'ഡോക്ടർ നിർദ്ദേശിച്ച പ്രകാരം പതിവായി കഴിക്കുക.',
+          important:
+            'ചികിത്സയ്ക്കുശേഷവും വയറിന്റെ അസ്വസ്ഥത തുടരുകയാണെങ്കിൽ ഡോക്ടറെ കാണുക.'
         }
       };
     }
 
-    // 5. Anti-Diabetic (Metformin, Glimepiride, etc.)
-    if (combined.includes('metformin') || combined.includes('glycomet') || combined.includes('glimepiride') || combined.includes('diabetes')) {
+    /*
+     * ---------------------------------------------------------
+     * 5. ANTI-DIABETIC
+     * ---------------------------------------------------------
+     */
+    if (
+      combined.includes('metformin') ||
+      combined.includes('glycomet') ||
+      combined.includes('glimepiride') ||
+      combined.includes('vildagliptin') ||
+      combined.includes('sitagliptin') ||
+      combined.includes('diabetes')
+    ) {
       return {
         en: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'Anti-Diabetic / Blood Sugar Control',
-          when: 'Take with or immediately after your main meals as directed by your doctor. Follow consistent daily timing.',
-          food: 'Always take with food or right after eating to minimize stomach upset. Do not take on an empty stomach.',
-          notes: 'Maintain regular blood sugar checks. Adhere to your recommended dietary and exercise routine.',
-          important: 'Avoid excessive alcohol consumption. Inform doctor if feeling severe fatigue or nausea.'
+          when:
+            'Take according to the schedule prescribed by your doctor. Do not change the dose without medical advice.',
+          food:
+            'Follow the food instructions specific to your medicine. Some diabetes medicines should be taken with or around meals.',
+          notes:
+            'Monitor blood sugar as advised and follow your recommended diet and activity plan.',
+          important:
+            'Do not change or stop diabetes medication without consulting your healthcare professional.'
         },
+
         ta: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'நீரிழிவு / இரத்த சர்க்கரை கட்டுப்பாட்டு மருந்து',
-          when: 'மருத்துவர் கூறியபடி முக்கிய உணவின் போது அல்லது சாப்பிட்ட உடனேயே எடுக்கவும். தினமும் ஒரே நேரத்தில் உட்கொள்ளவும்.',
-          food: 'வயிறு அசௌகரியத்தைத் தவிர்க்க எப்போதும் உணவோடு அல்லது சாப்பிட்ட உடனே எடுக்கவும். வெறும் வயிற்றில் எடுக்க வேண்டாம்.',
-          notes: 'இரத்த சர்க்கரை அளவை முறையாகப் பரிசோதிக்கவும். மருத்துவர் பரிந்துரைத்த உணவு முறையைப் பின்பற்றவும்.',
-          important: 'அதிக மது அருந்துவதைத் தவிர்க்கவும். அதிக சோர்வு ஏற்பட்டால் மருத்துவரிடம் தெரிவிக்கவும்.'
+          when:
+            'மருத்துவர் பரிந்துரைத்த அட்டவணைப்படி எடுத்துக்கொள்ளவும். மருத்துவ ஆலோசனை இல்லாமல் அளவை மாற்ற வேண்டாம்.',
+          food:
+            'உங்கள் மருந்துக்கான உணவு அறிவுறுத்தல்களைப் பின்பற்றவும். சில நீரிழிவு மருந்துகள் உணவுடன் அல்லது உணவு நேரத்தைச் சுற்றி எடுக்கப்பட வேண்டும்.',
+          notes:
+            'மருத்துவர் கூறியபடி இரத்த சர்க்கரையை பரிசோதித்து, பரிந்துரைக்கப்பட்ட உணவு முறையைப் பின்பற்றவும்.',
+          important:
+            'மருத்துவரிடம் ஆலோசிக்காமல் நீரிழிவு மருந்தை மாற்றவோ நிறுத்தவோ வேண்டாம்.'
         },
+
         hi: {
-          medicine: formatMedicineName(name),
-          category: 'मधुमेह / रक्त शर्करा नियंत्रण दवा',
-          when: 'डॉक्टर के निर्देशानुसार मुख्य भोजन के साथ या तुरंत बाद लें। प्रतिदिन एक ही समय पर लें।',
-          food: 'पेट की तकलीफ से बचने के लिए भोजन के साथ लें। खाली पेट कभी न लें।',
-          notes: 'नियमित रूप से शुगर की जांच करें और उचित आहार लें।',
-          important: 'शराब से बचें और अस्वस्थ महसूस होने पर डॉक्टर को बताएं।'
+          medicine: displayName,
+          category: 'मधुमेह / रक्त शर्करा नियंत्रण',
+          when:
+            'डॉक्टर द्वारा बताए गए समय के अनुसार लें। डॉक्टर की सलाह के बिना खुराक न बदलें।',
+          food:
+            'अपनी दवा के भोजन संबंधी निर्देशों का पालन करें। कुछ मधुमेह की दवाएं भोजन के साथ या भोजन के आसपास ली जाती हैं।',
+          notes:
+            'डॉक्टर की सलाह के अनुसार ब्लड शुगर की जांच करें और उचित आहार का पालन करें।',
+          important:
+            'डॉक्टर से सलाह किए बिना दवा बंद या बदलें नहीं।'
         },
+
         te: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'మధుమేహం / రక్తంలో చక్కెర నియంత్రణ',
-          when: 'డాక్టర్ సూచించిన ప్రకారం భోజనంతో లేదా తిన్న వెంటనే తీసుకోండి.',
-          food: 'కడుపు సమస్యలను నివారించడానికి ఆహారంతో తీసుకోండి. ఖాళీ కడుపుతో తీసుకోకండి.',
-          notes: 'క్రమం తప్పకుండా బ్లడ్ షుగర్ తనిఖీ చేయండి.',
-          important: 'పిల్లలకు దూరంగా భద్రపరచండి.'
+          when:
+            'డాక్టర్ సూచించిన సమయానికి తీసుకోండి. వైద్య సలహా లేకుండా మోతాదును మార్చవద్దు.',
+          food:
+            'మీ మందుకు సంబంధించిన ఆహార సూచనలను అనుసరించండి.',
+          notes:
+            'డాక్టర్ సూచించిన విధంగా బ్లడ్ షుగర్‌ను తనిఖీ చేయండి.',
+          important:
+            'వైద్య సలహా లేకుండా మందును ఆపవద్దు లేదా మార్చవద్దు.'
         },
+
         kn: {
-          medicine: formatMedicineName(name),
-          category: 'ಮಧುಮೇಹ ನಿಯಂತ್ರಣ ಔಷಧ',
-          when: 'ವೈದ್ಯರ ಸಲಹೆಯಂತೆ ಊಟದ ಸಮಯದಲ್ಲಿ ಅಥವಾ ಊಟದ ನಂತರ ತಕ್ಷಣ ತೆಗೆದುಕೊಳ್ಳಿ.',
-          food: 'ಹೊಟ್ಟೆಯ ತೊಂದರೆ ತಪ್ಪಿಸಲು ಆಹಾರದೊಂದಿಗೆ ತೆಗೆದುಕೊಳ್ಳಿ. ಖಾಲಿ ಹೊಟ್ಟೆಯಲ್ಲಿ ಬೇಡ.',
-          notes: 'ರಕ್ತದಲ್ಲಿನ ಸಕ್ಕರೆ ಮಟ್ಟವನ್ನು ನಿಯಮಿತವಾಗಿ ಪರಿಶೀಲಿಸಿ.',
-          important: 'ಸುರಕ್ಷಿತವಾಗಿ ತಂಪಾದ ಸ್ಥಳದಲ್ಲಿ ಇರಿಸಿ.'
+          medicine: displayName,
+          category: 'ಮಧುಮೇಹ / ರಕ್ತದಲ್ಲಿನ ಸಕ್ಕರೆ ನಿಯಂತ್ರಣ',
+          when:
+            'ವೈದ್ಯರು ಸೂಚಿಸಿದ ಸಮಯದಂತೆ ತೆಗೆದುಕೊಳ್ಳಿ. ವೈದ್ಯರ ಸಲಹೆಯಿಲ್ಲದೆ ಪ್ರಮಾಣ ಬದಲಾಯಿಸಬೇಡಿ.',
+          food:
+            'ನಿಮ್ಮ ಔಷಧಿಗೆ ಸಂಬಂಧಿಸಿದ ಆಹಾರ ಸೂಚನೆಗಳನ್ನು ಅನುಸರಿಸಿ.',
+          notes:
+            'ವೈದ್ಯರ ಸಲಹೆಯಂತೆ ರಕ್ತದಲ್ಲಿನ ಸಕ್ಕರೆಯನ್ನು ಪರೀಕ್ಷಿಸಿ.',
+          important:
+            'ವೈದ್ಯರ ಸಲಹೆಯಿಲ್ಲದೆ ಔಷಧಿಯನ್ನು ನಿಲ್ಲಿಸಬೇಡಿ ಅಥವಾ ಬದಲಾಯಿಸಬೇಡಿ.'
         },
+
         ml: {
-          medicine: formatMedicineName(name),
-          category: 'പ്രമേഹ നിയന്ത്രണ മരുന്ന്',
-          when: 'ഡോക്ടറുടെ നിർദ്ദേശപ്രകാരം ഭക്ഷണത്തോടൊപ്പം അല്ലെങ്കിൽ ഉടൻ ശേഷം കഴിക്കുക.',
-          food: 'വയറിന്റെ അസ്വസ്ഥത ഒഴിവാക്കാൻ ഭക്ഷണത്തോടൊപ്പം കഴിക്കുക.',
-          notes: 'രക്തത്തിലെ പഞ്ചസാരയുടെ അളവ് പതിവായി പരിശോധിക്കുക.',
-          important: 'കുട്ടികളിൽ നിന്ന് മാറ്റി സൂക്ഷിക്കുക.'
+          medicine: displayName,
+          category: 'പ്രമേഹ / രക്തത്തിലെ പഞ്ചസാര നിയന്ത്രണം',
+          when:
+            'ഡോക്ടർ നിർദ്ദേശിച്ച സമയക്രമം പാലിക്കുക. ഡോക്ടറുടെ നിർദ്ദേശമില്ലാതെ അളവ് മാറ്റരുത്.',
+          food:
+            'നിങ്ങളുടെ മരുന്നിനുള്ള ഭക്ഷണ നിർദ്ദേശങ്ങൾ പാലിക്കുക.',
+          notes:
+            'ഡോക്ടറുടെ നിർദ്ദേശപ്രകാരം രക്തത്തിലെ പഞ്ചസാര പരിശോധിക്കുക.',
+          important:
+            'ഡോക്ടറുടെ നിർദ്ദേശമില്ലാതെ മരുന്ന് നിർത്തുകയോ മാറ്റുകയോ ചെയ്യരുത്.'
         }
       };
     }
 
-    // 6. Antibiotics (Amoxicillin, Azithromycin, Ciprofloxacin, etc.)
-    if (combined.includes('amoxi') || combined.includes('amoxicillin') || combined.includes('azithro') || combined.includes('azithromycin') || combined.includes('cipro') || combined.includes('antibiotic')) {
+    /*
+     * ---------------------------------------------------------
+     * 6. ANTIBIOTICS
+     * ---------------------------------------------------------
+     */
+    if (
+      combined.includes('amoxicillin') ||
+      combined.includes('amoxi') ||
+      combined.includes('azithromycin') ||
+      combined.includes('azithro') ||
+      combined.includes('cipro') ||
+      combined.includes('cefixime') ||
+      combined.includes('antibiotic')
+    ) {
       return {
         en: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'Antibiotic / Bacterial Infection Treatment',
-          when: 'Take at evenly spaced intervals as prescribed by your doctor. Complete the full course even if you start feeling better.',
-          food: 'Can be taken with or after food. Drink plenty of water throughout the day.',
-          notes: 'Do not stop the medicine early — finishing the full course prevents infection recurrence and resistance.',
-          important: 'Inform your doctor immediately if you develop any rash or allergy. Do not share prescribed antibiotics.'
+          when:
+            'Take exactly according to the schedule prescribed by your doctor. Complete the prescribed course unless your healthcare professional tells you otherwise.',
+          food:
+            'Follow the food instructions specific to your antibiotic. Take with sufficient water.',
+          notes:
+            'Do not share antibiotics with another person and do not use leftover antibiotics for a new illness.',
+          important:
+            'Seek medical advice promptly if you develop signs of a serious allergic reaction such as difficulty breathing or swelling.'
         },
+
         ta: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'நுண்ணுயிர் எதிர்ப்பு மருந்து / தொற்று சிகிச்சை',
-          when: 'மருத்துவர் குறிப்பிட்ட சம கால இடைவெளியில் எடுக்கவும். உடல்நலம் தேறினாலும் மருத்துவர் கூறிய முழு நாட்களும் மருந்தை முடிக்கவும்.',
-          food: 'உணவுடனோ அல்லது உணவுக்குப் பின்னரோ எடுத்துக்கொள்ளலாம். நாள் முழுவதும் போதுமான தண்ணீர் குடிக்கவும்.',
-          notes: 'முன்கூட்டியே மருந்தை நிறுத்தாதீர்கள் — முழு கோர்ஸை முடிப்பது தொற்று மீண்டும் வருவதைத் தடுக்கும்.',
-          important: 'ஒவ்வாமை அல்லது அரிப்பு ஏற்பட்டால் உடனடியாக மருத்துவரை அணுகவும். பிறருடன் மருந்தைப் பகிர வேண்டாம்.'
+          when:
+            'மருத்துவர் குறிப்பிட்ட அட்டவணைப்படி எடுத்துக்கொள்ளவும். மருத்துவர் வேறு அறிவுரை வழங்காவிட்டால் பரிந்துரைக்கப்பட்ட கோர்ஸை முடிக்கவும்.',
+          food:
+            'உங்கள் குறிப்பிட்ட ஆன்டிபயாட்டிக்கிற்கான உணவு அறிவுறுத்தல்களைப் பின்பற்றவும். போதுமான தண்ணீருடன் எடுத்துக்கொள்ளவும்.',
+          notes:
+            'ஆன்டிபயாட்டிக் மருந்தை மற்றவர்களுடன் பகிர வேண்டாம். மீதமுள்ள மருந்தை புதிய நோய்க்கு பயன்படுத்த வேண்டாம்.',
+          important:
+            'மூச்சுத்திணறல் அல்லது வீக்கம் போன்ற கடுமையான ஒவ்வாமை அறிகுறிகள் ஏற்பட்டால் உடனடியாக மருத்துவ உதவி பெறவும்.'
         },
+
         hi: {
-          medicine: formatMedicineName(name),
+          medicine: displayName,
           category: 'एंटीबायोटिक / संक्रमण उपचार',
-          when: 'डॉक्टर द्वारा बताए गए समय पर लें। बेहतर महसूस होने पर भी पूरा कोर्स अवश्य पूरा करें।',
-          food: 'भोजन के साथ या बाद में ले सकते हैं। दिनभर पर्याप्त पानी पिएं।',
-          notes: 'दवा बीच में न छोड़ें — पूरा कोर्स करना जरूरी है ताकि संक्रमण दोबारा न हो।',
-          important: 'एलर्जी या दाने दिखने पर तुरंत डॉक्टर से संपर्क करें।'
+          when:
+            'डॉक्टर द्वारा बताए गए समय के अनुसार लें। डॉक्टर द्वारा अलग निर्देश न दिए जाने तक निर्धारित कोर्स पूरा करें।',
+          food:
+            'अपनी एंटीबायोटिक के भोजन संबंधी निर्देशों का पालन करें। पर्याप्त पानी के साथ लें।',
+          notes:
+            'एंटीबायोटिक किसी दूसरे व्यक्ति के साथ साझा न करें और बची हुई दवा को नई बीमारी में इस्तेमाल न करें।',
+          important:
+            'सांस लेने में कठिनाई या सूजन जैसी गंभीर एलर्जी के लक्षण हों तो तुरंत चिकित्सा सहायता लें।'
         },
+
         te: {
-          medicine: formatMedicineName(name),
-          category: 'యాంటీబయోటిక్ / ఇన్ఫెక్షన్ చికిత్స',
-          when: 'డాక్టర్ సూచించిన సమయాలలో తీసుకోండి. నయమైనట్లు అనిపించినా పూర్తి కోర్సు పూర్తి చేయండి.',
-          food: 'ఆహారంతో లేదా తర్వాత తీసుకోవచ్చు. పుష్కలంగా నీరు త్రాగండి.',
-          notes: 'ముందే మందును ఆపవద్దు.',
-          important: 'అలెర్జీ వస్తే వెంటనే డాక్టర్‌ను సంప్రదించండి.'
+          medicine: displayName,
+          category: 'యాంటీబయోటిక్ / బ్యాక్టీరియా ఇన్ఫెక్షన్ చికిత్స',
+          when:
+            'డాక్టర్ సూచించిన సమయానికి తీసుకోండి. వైద్యుడు వేరుగా చెప్పకపోతే సూచించిన కోర్సును పూర్తి చేయండి.',
+          food:
+            'మీ యాంటీబయోటిక్‌కు సంబంధించిన ఆహార సూచనలను అనుసరించండి. తగినంత నీటితో తీసుకోండి.',
+          notes:
+            'యాంటీబయోటిక్‌ను ఇతరులతో పంచుకోకండి. మిగిలిన మందును కొత్త అనారోగ్యానికి ఉపయోగించకండి.',
+          important:
+            'శ్వాస తీసుకోవడంలో ఇబ్బంది లేదా వాపు వంటి తీవ్రమైన అలెర్జీ లక్షణాలు ఉంటే వెంటనే వైద్య సహాయం పొందండి.'
         },
+
         kn: {
-          medicine: formatMedicineName(name),
-          category: 'ಪ್ರತಿಜೀವಕ / ಸೋಂಕು ಚಿಕಿತ್ಸೆ',
-          when: 'ವೈದ್ಯರು ಸೂಚಿಸಿದಂತೆ ನಿಯಮಿತ ಅಂತರದಲ್ಲಿ ತೆಗೆದುಕೊಳ್ಳಿ. ಸಂಪೂರ್ಣ ಕೋರ್ಸ್ ಮುಗಿಸಿ.',
-          food: 'ಆಹಾರದೊಂದಿಗೆ ಅಥವಾ ನಂತರ ತೆಗೆದುಕೊಳ್ಳಬಹುದು. ಸಾಕಷ್ಟು ನೀರು ಕುಡಿಯಿರಿ.',
-          notes: 'ಮುಂಚಿತವಾಗಿ ನಿಲ್ಲಿಸಬೇಡಿ.',
-          important: 'ಅಲರ್ಜಿ ಕಂಡುಬಂದರೆ ತಕ್ಷಣ ವೈದ್ಯರನ್ನು ಭೇಟಿ ಮಾಡಿ.'
+          medicine: displayName,
+          category: 'ಪ್ರತಿಜೀವಕ / ಬ್ಯಾಕ್ಟೀರಿಯಾ ಸೋಂಕಿನ ಚಿಕಿತ್ಸೆ',
+          when:
+            'ವೈದ್ಯರು ಸೂಚಿಸಿದ ಸಮಯದಂತೆ ತೆಗೆದುಕೊಳ್ಳಿ. ವೈದ್ಯರು ಬೇರೆ ಹೇಳದಿದ್ದರೆ ಸೂಚಿಸಿದ ಕೋರ್ಸ್ ಅನ್ನು ಪೂರ್ಣಗೊಳಿಸಿ.',
+          food:
+            'ನಿಮ್ಮ ಪ್ರತಿಜೀವಕಕ್ಕೆ ಸಂಬಂಧಿಸಿದ ಆಹಾರ ಸೂಚನೆಗಳನ್ನು ಅನುಸರಿಸಿ. ಸಾಕಷ್ಟು ನೀರಿನೊಂದಿಗೆ ತೆಗೆದುಕೊಳ್ಳಿ.',
+          notes:
+            'ಪ್ರತಿಜೀವಕವನ್ನು ಇತರರೊಂದಿಗೆ ಹಂಚಿಕೊಳ್ಳಬೇಡಿ. ಉಳಿದ ಔಷಧಿಯನ್ನು ಹೊಸ ಅನಾರೋಗ್ಯಕ್ಕೆ ಬಳಸಬೇಡಿ.',
+          important:
+            'ಉಸಿರಾಟದ ತೊಂದರೆ ಅಥವಾ ಊತದಂತಹ ತೀವ್ರ ಅಲರ್ಜಿ ಲಕ್ಷಣಗಳಿದ್ದರೆ ತಕ್ಷಣ ವೈದ್ಯಕೀಯ ಸಹಾಯ ಪಡೆಯಿರಿ.'
         },
+
         ml: {
-          medicine: formatMedicineName(name),
-          category: 'ആന്റിബയോട്ടിക് / അണുബാധ ചികിത്സ',
-          when: 'ഡോക്ടർ നിർദ്ദേശിച്ച കൃത്യമായ ഇടവേളകളിൽ കഴിക്കുക. മുഴുവൻ കോഴ്സും പൂർത്തിയാക്കുക.',
-          food: 'ഭക്ഷണത്തോടൊപ്പം അല്ലെങ്കിൽ ശേഷം കഴിക്കാം. ധാരാളം വെള്ളം കുടിക്കുക.',
-          notes: 'നേരത്തെ മരുന്ന് നിർത്തരുത്.',
-          important: 'അലർജി ഉണ്ടായാൽ ഉടൻ ഡോക്ടറെ കാണുക.'
+          medicine: displayName,
+          category: 'ആന്റിബയോട്ടിക് / ബാക്ടീരിയൽ അണുബാധ ചികിത്സ',
+          when:
+            'ഡോക്ടർ നിർദ്ദേശിച്ച സമയക്രമം കൃത്യമായി പാലിക്കുക. ഡോക്ടർ മറ്റൊന്ന് നിർദ്ദേശിച്ചില്ലെങ്കിൽ നിർദ്ദേശിച്ച കോഴ്സ് പൂർത്തിയാക്കുക.',
+          food:
+            'നിങ്ങളുടെ ആന്റിബയോട്ടിക്കിനുള്ള ഭക്ഷണ നിർദ്ദേശങ്ങൾ പാലിക്കുക. ആവശ്യത്തിന് വെള്ളത്തോടൊപ്പം കഴിക്കുക.',
+          notes:
+            'ആന്റിബയോട്ടിക് മറ്റൊരാളുമായി പങ്കിടരുത്. ശേഷിച്ച മരുന്ന് പുതിയ രോഗത്തിന് ഉപയോഗിക്കരുത്.',
+          important:
+            'ശ്വാസതടസ്സം അല്ലെങ്കിൽ വീക്കം പോലുള്ള ഗുരുതര അലർജി ലക്ഷണങ്ങൾ ഉണ്ടായാൽ ഉടൻ വൈദ്യസഹായം തേടുക.'
         }
       };
     }
 
-    // Default General Factual Guidance
+    /*
+     * ---------------------------------------------------------
+     * DEFAULT GENERAL MEDICINE GUIDANCE
+     * ---------------------------------------------------------
+     */
     return {
       en: {
-        medicine: formatMedicineName(name),
+        medicine: displayName,
         category: 'Prescription / General Medicine',
-        when: 'Follow the specific timing and dosage schedule provided by your doctor or pharmacist on your prescription label.',
-        food: 'Take with a full glass of water as directed on your medicine packaging or by your healthcare provider.',
-        notes: 'Do not alter or skip doses without consulting your doctor. Keep track of your prescription schedule.',
-        important: 'Keep in original packaging in a cool, dry place away from children and direct heat.'
+        when:
+          'Follow the exact timing and dosage schedule provided by your doctor or pharmacist on your prescription label.',
+        food:
+          'Follow the food instructions printed on the medicine package or provided by your healthcare professional.',
+        notes:
+          'Do not change, skip, or double doses without consulting your doctor or pharmacist.',
+        important:
+          'Keep the medicine in its original packaging in a cool, dry place away from children and direct heat.'
       },
+
       ta: {
-        medicine: formatMedicineName(name),
+        medicine: displayName,
         category: 'மருத்துவர் பரிந்துரைத்த பொது மருந்து',
-        when: 'உங்கள் மருந்துச் சீட்டில் உங்கள் மருத்துவர் அல்லது மருந்தாளுநர் குறிப்பிட்டுள்ள நேர அட்டவணையைப் பின்பற்றவும்.',
-        food: 'மருந்துப் பொதியில் உள்ள அறிவுறுத்தலின்படி அல்லது மருத்துவ ஆலோசனையின்படி ஒரு டம்ளர் தண்ணீருடன் எடுக்கவும்.',
-        notes: 'மருத்துவரிடம் ஆலோசிக்காமல் மருந்தை மாற்றவோ தவிர்க்கவோ வேண்டாம்.',
-        important: 'குழந்தைகளுக்கு எட்டாத குளிர்ந்த, உலர்ந்த இடத்தில் அசல் பேக்கிங்கில் பாதுகாப்பாக வைக்கவும்.'
+        when:
+          'உங்கள் மருந்துச் சீட்டில் மருத்துவர் அல்லது மருந்தாளுநர் குறிப்பிட்டுள்ள சரியான நேரம் மற்றும் அளவைப் பின்பற்றவும்.',
+        food:
+          'மருந்துப் பொதியில் அல்லது மருத்துவ நிபுணர் வழங்கிய உணவு தொடர்பான அறிவுறுத்தல்களைப் பின்பற்றவும்.',
+        notes:
+          'மருத்துவர் அல்லது மருந்தாளுநரிடம் ஆலோசிக்காமல் அளவை மாற்றவோ தவிர்க்கவோ இரட்டிப்பாக்கவோ வேண்டாம்.',
+        important:
+          'அசல் பேக்கிங்கில் குழந்தைகளுக்கு எட்டாத குளிர்ந்த, உலர்ந்த இடத்தில் பாதுகாப்பாக வைக்கவும்.'
       },
+
       hi: {
-        medicine: formatMedicineName(name),
+        medicine: displayName,
         category: 'प्रिस्क्रिप्शन / सामान्य दवा',
-        when: 'अपने पर्चे पर डॉक्टर या फार्मासिस्ट द्वारा बताए गए सटीक समय का पालन करें।',
-        food: 'दवा के पैकेट पर दिए गए निर्देशानुसार एक गिलास पानी के साथ लें।',
-        notes: 'डॉक्टर की सलाह के बिना खुराक में बदलाव न करें।',
-        important: 'बच्चों की पहुंच से दूर ठंडी व सूखी जगह पर रखें।'
+        when:
+          'अपने डॉक्टर या फार्मासिस्ट द्वारा पर्चे पर बताए गए सही समय और खुराक का पालन करें।',
+        food:
+          'दवा के पैकेट या स्वास्थ्यकर्मी द्वारा दिए गए भोजन संबंधी निर्देशों का पालन करें।',
+        notes:
+          'डॉक्टर या फार्मासिस्ट से सलाह किए बिना खुराक बदलें, छोड़ें या दोगुनी न करें।',
+        important:
+          'दवा को मूल पैकेजिंग में बच्चों की पहुंच से दूर ठंडी और सूखी जगह पर रखें।'
       },
+
       te: {
-        medicine: formatMedicineName(name),
+        medicine: displayName,
         category: 'సాధారణ ఔషధం',
-        when: 'మీ డాక్టర్ లేదా ఫార్మాసిస్ట్ సూచించిన ఖచ్చితమైన సమయాన్ని అనుసరించండి.',
-        food: 'తగినంత నీటితో ప్యాకెట్‌పై సూచించినట్లు తీసుకోండి.',
-        notes: 'డాక్టర్ సలహా లేకుండా మార్పులు చేయవద్దు.',
-        important: 'పిల్లలకు దూరంగా భద్రపరచండి.'
+        when:
+          'మీ డాక్టర్ లేదా ఫార్మసిస్ట్ సూచించిన ఖచ్చితమైన సమయం మరియు మోతాదును అనుసరించండి.',
+        food:
+          'మందు ప్యాకెట్‌పై లేదా వైద్య నిపుణులు ఇచ్చిన ఆహార సూచనలను అనుసరించండి.',
+        notes:
+          'వైద్య సలహా లేకుండా మోతాదును మార్చవద్దు, వదిలివేయవద్దు లేదా రెట్టింపు చేయవద్దు.',
+        important:
+          'మందును అసలు ప్యాకేజీలో పిల్లలకు దూరంగా చల్లని, పొడి ప్రదేశంలో ఉంచండి.'
       },
+
       kn: {
-        medicine: formatMedicineName(name),
+        medicine: displayName,
         category: 'ಸಾಮಾನ್ಯ ಔಷಧ',
-        when: 'ನಿಮ್ಮ ವೈದ್ಯರು ಅಥವಾ ಔಷಧಿಕಾರರು ಸೂಚಿಸಿದ ಸಮಯವನ್ನು ಅನುಸರಿಸಿ.',
-        food: 'ಪ್ಯಾಕೆಟ್‌ನಲ್ಲಿ ಸೂಚಿಸಿದಂತೆ ನೀರಿನೊಂದಿಗೆ ತೆಗೆದುಕೊಳ್ಳಿ.',
-        notes: 'ವೈದ್ಯರ ಸಲಹೆಯಿಲ್ಲದೆ ಬದಲಾವಣೆ ಮಾಡಬೇಡಿ.',
-        important: 'ಮಕ್ಕಳ ಕೈಗೆ ಸಿಗದಂತೆ ಇರಿಸಿ.'
+        when:
+          'ನಿಮ್ಮ ವೈದ್ಯರು ಅಥವಾ ಔಷಧಿಕಾರರು ಸೂಚಿಸಿದ ನಿಖರ ಸಮಯ ಮತ್ತು ಪ್ರಮಾಣವನ್ನು ಅನುಸರಿಸಿ.',
+        food:
+          'ಔಷಧಿಯ ಪ್ಯಾಕೆಟ್‌ನಲ್ಲಿ ಅಥವಾ ವೈದ್ಯಕೀಯ ವೃತ್ತಿಪರರು ನೀಡಿದ ಆಹಾರ ಸೂಚನೆಗಳನ್ನು ಅನುಸರಿಸಿ.',
+        notes:
+          'ವೈದ್ಯರ ಅಥವಾ ಔಷಧಿಕಾರರ ಸಲಹೆಯಿಲ್ಲದೆ ಪ್ರಮಾಣವನ್ನು ಬದಲಾಯಿಸಬೇಡಿ, ಬಿಟ್ಟುಬಿಡಬೇಡಿ ಅಥವಾ ದ್ವಿಗುಣಗೊಳಿಸಬೇಡಿ.',
+        important:
+          'ಔಷಧಿಯನ್ನು ಮೂಲ ಪ್ಯಾಕೇಜ್‌ನಲ್ಲಿ ಮಕ್ಕಳ ಕೈಗೆ ಸಿಗದ ತಂಪಾದ ಮತ್ತು ಒಣ ಸ್ಥಳದಲ್ಲಿ ಇರಿಸಿ.'
       },
+
       ml: {
-        medicine: formatMedicineName(name),
+        medicine: displayName,
         category: 'ജനറൽ മരുന്ന്',
-        when: 'ഡോക്ടർ അല്ലെങ്കിൽ ഫാർമസിസ്റ്റ് നിർദ്ദേശിച്ച സമയം കൃത്യമായി പാലിക്കുക.',
-        food: 'പാക്കറ്റിൽ നിർദ്ദേശിച്ചതുപോലെ വെള്ളത്തോടൊപ്പം കഴിക്കുക.',
-        notes: 'ഡോക്ടറുടെ അനുവാദമില്ലാതെ മാറ്റങ്ങൾ വരുത്തരുത്.',
-        important: 'കുട്ടികളിൽ നിന്ന് മാറ്റി സൂക്ഷിക്കുക.'
+        when:
+          'ഡോക്ടർ അല്ലെങ്കിൽ ഫാർമസിസ്റ്റ് നിർദ്ദേശിച്ച കൃത്യമായ സമയവും അളവും പാലിക്കുക.',
+        food:
+          'മരുന്നിന്റെ പാക്കറ്റിലോ ആരോഗ്യപ്രവർത്തകൻ നൽകിയതോ ആയ ഭക്ഷണ നിർദ്ദേശങ്ങൾ പാലിക്കുക.',
+        notes:
+          'ഡോക്ടറുടെയോ ഫാർമസിസ്റ്റിന്റെയോ നിർദ്ദേശമില്ലാതെ അളവ് മാറ്റുകയോ ഒഴിവാക്കുകയോ ഇരട്ടിയാക്കുകയോ ചെയ്യരുത്.',
+        important:
+          'മരുന്ന് അതിന്റെ യഥാർത്ഥ പാക്കേജിൽ കുട്ടികൾക്ക് ലഭിക്കാത്ത തണുത്തതും ഉണങ്ങിയതുമായ സ്ഥലത്ത് സൂക്ഷിക്കുക.'
       }
     };
   }
 
   /**
-   * Fallback dataset of common Indian pharmaceutical formulations
-   * Used as instant response & network fallback
+   * Local fallback dataset.
+   *
+   * Used when the DrugDB API cannot be reached.
    */
   const FALLBACK_MEDICINES = [
     {
-      medicineSctid: "906051000189105",
-      medicineName: "Para Para (paracetamol) 650 mg oral tablet",
-      brand: "Para Para 650",
-      manufacturer: "Perk Pharmaceuticals Limited",
-      generic: "Acetaminophen / Paracetamol 650 mg oral tablet"
+      medicineSctid: '906051000189105',
+      medicineName: 'Para Para (paracetamol) 650 mg oral tablet',
+      brand: 'Para Para 650',
+      manufacturer: 'Perk Pharmaceuticals Limited',
+      generic: 'Paracetamol 650 mg oral tablet'
     },
+
     {
-      medicineSctid: "562441000189108",
-      medicineName: "Dolo 650 (paracetamol) 650 mg oral tablet",
-      brand: "Dolo 650",
-      manufacturer: "Micro Labs Ltd",
-      generic: "Paracetamol 650 mg oral tablet"
+      medicineSctid: '562441000189108',
+      medicineName: 'Dolo 650 (paracetamol) 650 mg oral tablet',
+      brand: 'Dolo 650',
+      manufacturer: 'Micro Labs Ltd',
+      generic: 'Paracetamol 650 mg oral tablet'
     },
+
     {
-      medicineSctid: "322236009",
-      medicineName: "Crocin Advance (paracetamol) 500 mg oral tablet",
-      brand: "Crocin Advance",
-      manufacturer: "GlaxoSmithKline Consumer Healthcare",
-      generic: "Paracetamol 500 mg oral tablet"
+      medicineSctid: '322236009',
+      medicineName: 'Crocin Advance (paracetamol) 500 mg oral tablet',
+      brand: 'Crocin Advance',
+      manufacturer: 'GlaxoSmithKline Consumer Healthcare',
+      generic: 'Paracetamol 500 mg oral tablet'
     },
+
     {
-      medicineSctid: "784231000189109",
-      medicineName: "Amlo (amlodipine besilate) 5 mg oral tablet",
-      brand: "Amlo 5",
-      manufacturer: "Orchid Chemicals & Pharmaceuticals Limited",
-      generic: "Amlodipine (as amlodipine besylate) 5 mg oral tablet"
+      medicineSctid: '784231000189109',
+      medicineName: 'Amlo (amlodipine besilate) 5 mg oral tablet',
+      brand: 'Amlo 5',
+      manufacturer: 'Orchid Chemicals & Pharmaceuticals Limited',
+      generic: 'Amlodipine 5 mg oral tablet'
     },
+
     {
-      medicineSctid: "784231000189110",
-      medicineName: "Amlong (amlodipine) 5 mg oral tablet",
-      brand: "Amlong 5",
-      manufacturer: "Micro Labs Ltd",
-      generic: "Amlodipine 5 mg oral tablet"
+      medicineSctid: '784231000189110',
+      medicineName: 'Amlong (amlodipine) 5 mg oral tablet',
+      brand: 'Amlong 5',
+      manufacturer: 'Micro Labs Ltd',
+      generic: 'Amlodipine 5 mg oral tablet'
     },
+
     {
-      medicineSctid: "784231000189111",
-      medicineName: "Amlokind 5 (amlodipine) 5 mg oral tablet",
-      brand: "Amlokind",
-      manufacturer: "Mankind Pharma Ltd",
-      generic: "Amlodipine 5 mg oral tablet"
+      medicineSctid: '784231000189111',
+      medicineName: 'Amlokind 5 (amlodipine) 5 mg oral tablet',
+      brand: 'Amlokind 5',
+      manufacturer: 'Mankind Pharma Ltd',
+      generic: 'Amlodipine 5 mg oral tablet'
     },
+
     {
-      medicineSctid: "322238002",
-      medicineName: "Cetzine (cetirizine hydrochloride) 10 mg oral tablet",
-      brand: "Cetzine 10",
+      medicineSctid: '322238002',
+      medicineName: 'Cetzine (cetirizine hydrochloride) 10 mg oral tablet',
+      brand: 'Cetzine 10',
       manufacturer: "Dr. Reddy's Laboratories Ltd",
-      generic: "Cetirizine hydrochloride 10 mg oral tablet"
+      generic: 'Cetirizine hydrochloride 10 mg oral tablet'
     },
+
     {
-      medicineSctid: "322238003",
-      medicineName: "Zyrtec (cetirizine) 10 mg oral tablet",
-      brand: "Zyrtec",
-      manufacturer: "GSK Pharmaceuticals",
-      generic: "Cetirizine 10 mg oral tablet"
+      medicineSctid: '322238003',
+      medicineName: 'Zyrtec (cetirizine) 10 mg oral tablet',
+      brand: 'Zyrtec',
+      manufacturer: 'GSK Pharmaceuticals',
+      generic: 'Cetirizine 10 mg oral tablet'
     },
+
     {
-      medicineSctid: "322238004",
-      medicineName: "Okacet (cetirizine) 10 mg oral tablet",
-      brand: "Okacet",
-      manufacturer: "Cipla Ltd",
-      generic: "Cetirizine 10 mg oral tablet"
+      medicineSctid: '322238004',
+      medicineName: 'Okacet (cetirizine) 10 mg oral tablet',
+      brand: 'Okacet',
+      manufacturer: 'Cipla Ltd',
+      generic: 'Cetirizine 10 mg oral tablet'
     },
+
     {
-      medicineSctid: "322239001",
-      medicineName: "Pan 40 (pantoprazole sodium) 40 mg gastro-resistant tablet",
-      brand: "Pan 40",
-      manufacturer: "Alkem Laboratories Ltd",
-      generic: "Pantoprazole 40 mg gastro-resistant tablet"
+      medicineSctid: '322239001',
+      medicineName: 'Pan 40 (pantoprazole sodium) 40 mg gastro-resistant tablet',
+      brand: 'Pan 40',
+      manufacturer: 'Alkem Laboratories Ltd',
+      generic: 'Pantoprazole 40 mg gastro-resistant tablet'
     },
+
     {
-      medicineSctid: "322239002",
-      medicineName: "Pantocid 40 (pantoprazole) 40 mg oral tablet",
-      brand: "Pantocid 40",
-      manufacturer: "Sun Pharmaceutical Industries Ltd",
-      generic: "Pantoprazole 40 mg oral tablet"
+      medicineSctid: '322239002',
+      medicineName: 'Pantocid 40 (pantoprazole) 40 mg oral tablet',
+      brand: 'Pantocid 40',
+      manufacturer: 'Sun Pharmaceutical Industries Ltd',
+      generic: 'Pantoprazole 40 mg oral tablet'
     },
+
     {
-      medicineSctid: "322240001",
-      medicineName: "Glycomet 500 (metformin hydrochloride) 500 mg oral tablet",
-      brand: "Glycomet 500",
-      manufacturer: "USV Private Limited",
-      generic: "Metformin hydrochloride 500 mg oral tablet"
+      medicineSctid: '322240001',
+      medicineName: 'Glycomet 500 (metformin hydrochloride) 500 mg oral tablet',
+      brand: 'Glycomet 500',
+      manufacturer: 'USV Private Limited',
+      generic: 'Metformin hydrochloride 500 mg oral tablet'
     },
+
     {
-      medicineSctid: "322240002",
-      medicineName: "Glycomet-GP 1 (metformin + glimepiride) tablet",
-      brand: "Glycomet-GP 1",
-      manufacturer: "USV Private Limited",
-      generic: "Metformin 500 mg + Glimepiride 1 mg tablet"
+      medicineSctid: '322240002',
+      medicineName: 'Glycomet-GP 1 (metformin + glimepiride) tablet',
+      brand: 'Glycomet-GP 1',
+      manufacturer: 'USV Private Limited',
+      generic: 'Metformin 500 mg + Glimepiride 1 mg tablet'
     },
+
     {
-      medicineSctid: "322241001",
-      medicineName: "Novamox 500 (amoxicillin trihydrate) 500 mg oral capsule",
-      brand: "Novamox 500",
-      manufacturer: "Cipla Ltd",
-      generic: "Amoxicillin 500 mg oral capsule"
+      medicineSctid: '322241001',
+      medicineName: 'Novamox 500 (amoxicillin trihydrate) 500 mg oral capsule',
+      brand: 'Novamox 500',
+      manufacturer: 'Cipla Ltd',
+      generic: 'Amoxicillin 500 mg oral capsule'
     },
+
     {
-      medicineSctid: "322241002",
-      medicineName: "Mox 500 (amoxicillin) 500 mg oral capsule",
-      brand: "Mox 500",
-      manufacturer: "Sun Pharmaceutical Industries Ltd",
-      generic: "Amoxicillin 500 mg oral capsule"
+      medicineSctid: '322241002',
+      medicineName: 'Mox 500 (amoxicillin) 500 mg oral capsule',
+      brand: 'Mox 500',
+      manufacturer: 'Sun Pharmaceutical Industries Ltd',
+      generic: 'Amoxicillin 500 mg oral capsule'
     },
+
     {
-      medicineSctid: "322241003",
-      medicineName: "Augmentin 625 Duo (amoxicillin + clavulanic acid) tablet",
-      brand: "Augmentin 625 Duo",
-      manufacturer: "GlaxoSmithKline Pharmaceuticals Ltd",
-      generic: "Amoxicillin 500 mg + Clavulanic Acid 125 mg tablet"
+      medicineSctid: '322241003',
+      medicineName: 'Augmentin 625 Duo (amoxicillin + clavulanic acid) tablet',
+      brand: 'Augmentin 625 Duo',
+      manufacturer: 'GlaxoSmithKline Pharmaceuticals Ltd',
+      generic: 'Amoxicillin 500 mg + Clavulanic Acid 125 mg tablet'
     },
+
     {
-      medicineSctid: "322242001",
-      medicineName: "Azithral 500 (azithromycin) 500 mg oral tablet",
-      brand: "Azithral 500",
-      manufacturer: "Alembic Pharmaceuticals Ltd",
-      generic: "Azithromycin 500 mg oral tablet"
+      medicineSctid: '322242001',
+      medicineName: 'Azithral 500 (azithromycin) 500 mg oral tablet',
+      brand: 'Azithral 500',
+      manufacturer: 'Alembic Pharmaceuticals Ltd',
+      generic: 'Azithromycin 500 mg oral tablet'
     },
+
     {
-      medicineSctid: "322243001",
-      medicineName: "Telma 40 (telmisartan) 40 mg oral tablet",
-      brand: "Telma 40",
-      manufacturer: "Glenmark Pharmaceuticals Ltd",
-      generic: "Telmisartan 40 mg oral tablet"
+      medicineSctid: '322243001',
+      medicineName: 'Telma 40 (telmisartan) 40 mg oral tablet',
+      brand: 'Telma 40',
+      manufacturer: 'Glenmark Pharmaceuticals Ltd',
+      generic: 'Telmisartan 40 mg oral tablet'
     },
+
     {
-      medicineSctid: "322244001",
-      medicineName: "Atorva 10 (atorvastatin) 10 mg oral tablet",
-      brand: "Atorva 10",
-      manufacturer: "Zydus Cadila Healthcare",
-      generic: "Atorvastatin 10 mg oral tablet"
+      medicineSctid: '322244001',
+      medicineName: 'Atorva 10 (atorvastatin) 10 mg oral tablet',
+      brand: 'Atorva 10',
+      manufacturer: 'Zydus Cadila Healthcare',
+      generic: 'Atorvastatin 10 mg oral tablet'
     },
+
     {
-      medicineSctid: "322245001",
-      medicineName: "Omez 20 (omeprazole) 20 mg oral capsule",
-      brand: "Omez 20",
+      medicineSctid: '322245001',
+      medicineName: 'Omez 20 (omeprazole) 20 mg oral capsule',
+      brand: 'Omez 20',
       manufacturer: "Dr. Reddy's Laboratories Ltd",
-      generic: "Omeprazole 20 mg oral capsule"
+      generic: 'Omeprazole 20 mg oral capsule'
     }
   ];
 
+  /**
+   * Search the local fallback medicine database.
+   *
+   * Supports partial matching:
+   *   para
+   *   dolo
+   *   amlo
+   *   ceti
+   *   panto
+   *   glyco
+   *   amoxi
+   *   azith
+   *   telma
+   *   ator
+   *   omez
+   *
+   * @param {string} query
+   * @returns {Array}
+   */
   function searchFallbackMedicines(query) {
-    const q = query.toLowerCase().trim();
-    const matches = FALLBACK_MEDICINES.filter(m => {
-      return m.medicineName.toLowerCase().includes(q) ||
-        m.brand.toLowerCase().includes(q) ||
-        m.generic.toLowerCase().includes(q);
+    const q = String(query || '')
+      .toLowerCase()
+      .trim();
+
+    if (q.length < MIN_QUERY_LENGTH) {
+      return [];
+    }
+
+    const matches = FALLBACK_MEDICINES.filter((medicine) => {
+      const searchableText = [
+        medicine.medicineName,
+        medicine.brand,
+        medicine.generic,
+        medicine.manufacturer
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+
+      return searchableText.includes(q);
     });
-    return matches.map((m, i) => parseDrugDBItem(m, i));
+
+    return matches
+      .map((medicine, index) => {
+        const parsed = parseDrugDBItem(
+          {
+            ...medicine
+          },
+          index
+        );
+
+        if (parsed) {
+          parsed.isLiveDrugDB = false;
+        }
+
+        return parsed;
+      })
+      .filter(Boolean)
+      .slice(0, MAX_RESULTS);
   }
 
+  /**
+   * Clear all cached searches.
+   */
+  function clearCache() {
+    CACHE.clear();
+  }
+
+  /**
+   * Remove one cached search.
+   *
+   * @param {string} query
+   */
+  function clearCacheFor(query) {
+    const key = String(query || '')
+      .trim()
+      .toLowerCase();
+
+    if (key) {
+      CACHE.delete(key);
+    }
+  }
+
+  /**
+   * Return cache size.
+   *
+   * @returns {number}
+   */
+  function getCacheSize() {
+    return CACHE.size;
+  }
+
+  /**
+   * Public API.
+   */
   return {
     search,
+
     parseDrugDBItem,
     formatMedicineName,
     buildFactualInstructions,
+
+    searchFallbackMedicines,
+
+    clearCache,
+    clearCacheFor,
+    getCacheSize,
+
     FALLBACK_MEDICINES
   };
 })();
 
+/**
+ * Browser global.
+ */
 if (typeof window !== 'undefined') {
   window.DrugDB = DrugDB;
 }
-if (typeof module !== 'undefined' && module.exports) {
+
+/**
+ * CommonJS / Node.js support.
+ */
+if (
+  typeof module !== 'undefined' &&
+  module.exports
+) {
   module.exports = DrugDB;
 }
