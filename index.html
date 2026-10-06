@@ -1,20 +1,973 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
-    <link rel="icon" type="image/png" href="/logo.png" />
-    <link rel="shortcut icon" href="/favicon.ico" />
-    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
-    <link href="/manifest.json" rel="manifest" />
-    <title>DoseSpeak</title>
-    <script crossorigin="" src="/assets/index-HOACn-dz.js" type="module"></script>
-    <link crossorigin="" href="/assets/index-BK0KXJb1.css" rel="stylesheet" />
-    <meta content="yes" name="mobile-web-app-capable" />
-    <meta content="black" name="apple-mobile-web-app-status-bar-style" />
-    <meta content="DoseSpeak" name="apple-mobile-web-app-title" />
-  </head>
-  <body>
-    <div id="root"></div>
-  </body>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="DoseSpeak — Medicine instructions, spoken your way. Scan your medicine and hear instructions in Tamil, English, Hindi and more." />
+  <meta name="theme-color" content="#2B7FD4" />
+  <title>DoseSpeak — Scan it. Understand it. Hear it.</title>
+
+  <!-- Preconnect for fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+  <!-- Stylesheets -->
+  <link rel="stylesheet" href="css/design-system.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/app.css" />
+
+  <!-- Tesseract.js for OCR -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+</head>
+<body>
+
+<!-- Skip Link -->
+<a href="#medicine-assistant" class="skip-link">Skip to medicine assistant</a>
+
+<!-- ═══════════════════════ HEADER ═══════════════════════════════ -->
+<header class="header" role="banner">
+  <div class="header-inner">
+    <!-- Logo -->
+    <a href="#" class="logo" aria-label="DoseSpeak home">
+      <span class="logo-icon">💊</span>
+      <span class="logo-text">Dose<span>Speak</span></span>
+    </a>
+
+    <!-- Desktop Nav -->
+    <nav class="header-nav" aria-label="Main navigation">
+      <a href="#hero"               class="nav-link" id="nav-home">Home</a>
+      <a href="#how-it-works"       class="nav-link">How It Works</a>
+      <a href="#help-safety"        class="nav-link">Help &amp; Safety</a>
+    </nav>
+
+    <!-- Actions -->
+    <div class="header-actions">
+      <button class="lang-toggle" id="header-lang-btn" aria-label="Switch language" title="Switch language">
+        🌐 <span>தமிழ்</span>
+      </button>
+      <button class="a11y-toggle" id="a11y-panel-toggle" aria-label="Accessibility settings" aria-haspopup="true" aria-expanded="false" title="Accessibility options">
+        ♿ <span>Accessibility</span>
+      </button>
+      <button class="btn btn-primary" id="header-start-btn">
+        Start DoseSpeak
+      </button>
+      <button class="hamburger" id="hamburger" aria-label="Open menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- Accessibility Panel -->
+<div class="a11y-panel" id="a11y-panel" role="dialog" aria-label="Accessibility options">
+  <div class="a11y-panel-title">⚙️ Accessibility</div>
+
+  <div class="a11y-option">
+    <div class="a11y-option-label">
+      <span class="a11y-option-icon">🔠</span> Large Text
+    </div>
+    <label class="toggle-switch">
+      <input type="checkbox" id="a11y-text-toggle" aria-label="Toggle large text" />
+      <span class="toggle-track"></span>
+    </label>
+  </div>
+
+  <div class="a11y-option">
+    <div class="a11y-option-label">
+      <span class="a11y-option-icon">◐</span> High Contrast
+    </div>
+    <label class="toggle-switch">
+      <input type="checkbox" id="a11y-contrast-toggle" aria-label="Toggle high contrast" />
+      <span class="toggle-track"></span>
+    </label>
+  </div>
+
+  <div class="a11y-option">
+    <div class="a11y-option-label">
+      <span class="a11y-option-icon">👵</span> Easy Mode
+    </div>
+    <label class="toggle-switch">
+      <input type="checkbox" id="a11y-easy-toggle" aria-label="Toggle easy mode" />
+      <span class="toggle-track"></span>
+    </label>
+  </div>
+
+  <div class="a11y-option" style="padding-top: var(--space-4); border-bottom:none;">
+    <div class="a11y-option-label" style="font-size:var(--text-xs); color:var(--color-gray);">
+      Settings are saved automatically
+    </div>
+  </div>
+</div>
+
+<!-- Mobile Menu -->
+<nav class="mobile-menu" id="mobile-menu" aria-label="Mobile navigation">
+  <a href="#hero"           class="mobile-nav-link" id="mob-home">🏠 Home</a>
+  <a href="#how-it-works"   class="mobile-nav-link">ℹ️ How It Works</a>
+  <a href="#help-safety"    class="mobile-nav-link">🛡 Help &amp; Safety</a>
+  <div class="mobile-menu-divider"></div>
+  <a href="#medicine-assistant" class="mobile-nav-link">💊 Try DoseSpeak</a>
+  <div class="mobile-menu-divider"></div>
+  <div style="padding: var(--space-4) var(--space-5);">
+    <div style="font-size: var(--text-sm); color:var(--color-gray); margin-bottom:var(--space-3);">Accessibility</div>
+    <div style="display:flex; gap:var(--space-3); flex-wrap:wrap;">
+      <label style="display:flex;align-items:center;gap:var(--space-2);font-size:var(--text-sm);">
+        <input type="checkbox" id="mob-easy" onchange="Accessibility.setEasyMode(this.checked)" style="width:18px;height:18px;" />
+        Easy Mode
+      </label>
+    </div>
+  </div>
+</nav>
+
+<!-- ═══════════════════════ HERO ══════════════════════════════════ -->
+<section class="hero" id="hero" aria-labelledby="hero-heading">
+  <div class="container">
+    <div class="hero-inner">
+      <div class="hero-content">
+        <div class="hero-eyebrow">
+          💊 Healthcare Accessibility Tool
+        </div>
+        <h1 class="hero-heading" id="hero-heading">
+          Medicine instructions,<br/><span class="accent">spoken your way.</span>
+        </h1>
+        <p class="hero-subheading">
+          Scan your medicine or enter its name. DoseSpeak helps you understand the instructions and hear them in the language you prefer.
+        </p>
+        <div class="hero-cta">
+          <button class="btn btn-primary btn-xl" id="hero-cta-btn">
+            Try DoseSpeak →
+          </button>
+          <a class="hero-see-how" href="#how-it-works" id="hero-see-how">
+            See how it works ↓
+          </a>
+        </div>
+      </div>
+
+      <div class="hero-visual">
+        <img
+          src="assets/hero-mockup.png"
+          alt="DoseSpeak app showing Paracetamol medicine instructions in Tamil and English with a Listen button"
+          class="hero-visual-img"
+          width="480"
+          height="520"
+        />
+        <div class="hero-visual-badge">
+          🔊 கேளுங்கள் · Listen
+        </div>
+        <div class="hero-visual-badge2">
+          ✓ Tamil Supported
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ BENEFITS ══════════════════════════════ -->
+<section class="benefits" aria-label="Key benefits">
+  <div class="container">
+    <div class="benefits-grid">
+      <div class="benefit-card reveal">
+        <span class="benefit-icon">👁</span>
+        <h3 class="benefit-title">Easy to Read</h3>
+        <p class="benefit-desc">Large, clear instructions. No small text, no confusion.</p>
+      </div>
+      <div class="benefit-card reveal reveal-delay-1">
+        <span class="benefit-icon">🔊</span>
+        <h3 class="benefit-title">Easy to Hear</h3>
+        <p class="benefit-desc">Listen to instructions with a single tap.</p>
+      </div>
+      <div class="benefit-card reveal reveal-delay-2">
+        <span class="benefit-icon">🌐</span>
+        <h3 class="benefit-title">Your Language</h3>
+        <p class="benefit-desc">Tamil, English, Hindi and more — your choice.</p>
+      </div>
+      <div class="benefit-card reveal reveal-delay-3">
+        <span class="benefit-icon">❤️</span>
+        <h3 class="benefit-title">Made for Elderly</h3>
+        <p class="benefit-desc">Designed first for those who need it most.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════ MEDICINE ASSISTANT ═══════════════════════ -->
+<section class="medicine-assistant" id="medicine-assistant" aria-labelledby="assistant-heading">
+  <div class="container assistant-inner">
+
+    <!-- ─── VIEW: HOME ─── -->
+    <div class="view active" id="view-home">
+      <div class="section-header" style="text-align:center; margin-bottom:var(--space-10);">
+        <p class="section-label">💊 Medicine Assistant</p>
+        <h2 class="section-title" id="assistant-heading">How can we help you today?</h2>
+        <p class="section-subtitle">Scan your medicine or enter its name.</p>
+      </div>
+
+      <div class="options-grid">
+        <!-- Scan Option -->
+        <div class="medicine-option-card" id="option-scan" role="button" tabindex="0" aria-label="Scan medicine with camera">
+          <span class="medicine-option-icon">📷</span>
+          <h3 class="medicine-option-title">Scan Medicine</h3>
+          <p class="medicine-option-desc">Take a photo of your medicine strip and we'll read the instructions for you.</p>
+          <button class="btn btn-primary btn-lg btn-full" id="option-scan-btn">
+            📷 Scan Medicine
+          </button>
+        </div>
+
+        <!-- Enter Option -->
+        <div class="medicine-option-card" id="option-search" role="button" tabindex="0" aria-label="Enter medicine name manually">
+          <span class="medicine-option-icon">⌨️</span>
+          <h3 class="medicine-option-title">Enter Medicine</h3>
+          <p class="medicine-option-desc">Already know the medicine name? Type it here and get instructions instantly.</p>
+          <button class="btn btn-secondary btn-lg btn-full" id="option-search-btn">
+            ⌨️ Enter Medicine
+          </button>
+        </div>
+      </div>
+
+      <!-- Safety notice at bottom -->
+      <div class="safety-notice" style="margin-top:var(--space-8);">
+        <span class="safety-notice-icon">⚠️</span>
+        <div>
+          <div class="safety-notice-title">Always follow your doctor's instructions</div>
+          <div class="safety-notice-text">DoseSpeak is an accessibility tool. It does not replace your doctor or pharmacist's advice.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── VIEW: SCAN ─── -->
+    <div class="view" id="view-scan">
+      <button class="back-btn" data-back="home" style="margin-bottom:var(--space-6);">← Back</button>
+
+      <div class="section-header" style="text-align:center; margin-bottom:var(--space-8);">
+        <h2 class="section-title">Take a photo of your medicine</h2>
+        <p class="section-subtitle">Make sure the medicine name is clearly visible.</p>
+      </div>
+
+      <!-- Upload Area -->
+      <div class="upload-area" id="scan-upload-area" role="button" tabindex="0" aria-label="Upload or take a photo of your medicine">
+        <div class="upload-icon">📷</div>
+        <h3 class="upload-title">Tap to upload a photo</h3>
+        <p class="upload-desc">Or drag and drop your medicine photo here</p>
+        <div class="scan-buttons" style="justify-content:center;">
+          <button class="btn btn-primary btn-lg" id="scan-camera-btn" type="button">
+            📷 Open Camera
+          </button>
+          <button class="btn btn-secondary btn-lg" id="scan-upload-btn" type="button">
+            ⬆ Upload Photo
+          </button>
+        </div>
+      </div>
+
+      <!-- Image Preview (hidden until file selected) -->
+      <div class="image-preview-wrap" id="image-preview-wrap">
+        <img class="image-preview" id="image-preview" alt="Your uploaded medicine photo" />
+      </div>
+
+      <!-- Hidden file input -->
+      <input type="file" id="scan-file-input" accept="image/*" style="display:none;" aria-label="Choose image file" />
+
+      <!-- Process button (shown after upload) -->
+      <button
+        class="btn btn-primary btn-xl btn-full"
+        id="scan-process-btn"
+        style="display:none; margin-top:var(--space-6);"
+        type="button"
+      >
+        Read My Medicine →
+      </button>
+
+      <div style="text-align:center; margin-top:var(--space-5);">
+        <button class="btn btn-ghost" data-back="home">
+          ⌨️ Enter medicine name instead
+        </button>
+      </div>
+    </div>
+
+    <!-- ─── VIEW: PROCESSING ─── -->
+    <div class="view" id="view-processing">
+      <div class="loading-state">
+        <div class="loading-spinner" role="status" aria-label="Processing"></div>
+        <h2 class="loading-title" id="processing-status">Reading your medicine...</h2>
+        <p class="loading-subtitle">Preparing your instructions...</p>
+      </div>
+    </div>
+
+    <!-- ─── VIEW: SCAN ERROR ─── -->
+    <div class="view" id="view-scan-error">
+      <div class="error-state">
+        <div class="error-icon">📷</div>
+        <h2 class="error-title">We couldn't read the medicine name.</h2>
+        <p class="error-text">Please try another clear photo or enter the medicine name manually.</p>
+        <div class="error-actions">
+          <button class="btn btn-primary btn-lg" id="scan-error-try-again">Try Again</button>
+          <button class="btn btn-secondary btn-lg" id="scan-error-manual">⌨️ Enter Medicine</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── VIEW: SEARCH ─── -->
+    <div class="view" id="view-search">
+      <button class="back-btn" data-back="home" style="margin-bottom:var(--space-6);">← Back</button>
+
+      <div class="section-header" style="text-align:center; margin-bottom:var(--space-8);">
+        <h2 class="section-title">What is the medicine called?</h2>
+        <p class="section-subtitle">Search by name to find instructions.</p>
+      </div>
+
+      <div class="search-wrap" style="max-width:600px; margin:0 auto;">
+        <span class="search-icon" aria-hidden="true">🔍</span>
+        <input
+          type="text"
+          class="search-input"
+          id="medicine-search-input"
+          placeholder="Example: Paracetamol"
+          autocomplete="off"
+          aria-label="Search medicine name"
+          aria-autocomplete="list"
+          aria-controls="autocomplete-list"
+        />
+        <div class="autocomplete-list" id="autocomplete-list" role="listbox" aria-label="Medicine suggestions"></div>
+      </div>
+
+      <!-- Quick Suggestions -->
+      <div style="max-width:600px; margin:var(--space-8) auto 0;">
+        <p style="font-size:var(--text-sm); color:var(--color-gray); margin-bottom:var(--space-4);">Common medicines:</p>
+        <div style="display:flex; flex-wrap:wrap; gap:var(--space-3);">
+          <button class="btn btn-secondary" onclick="selectMedicineById('paracetamol-500')">💊 Paracetamol 500 mg</button>
+          <button class="btn btn-secondary" onclick="selectMedicineById('cetirizine-10')">🌿 Cetirizine 10 mg</button>
+          <button class="btn btn-secondary" onclick="selectMedicineById('pantoprazole-40')">🟡 Pantoprazole 40 mg</button>
+          <button class="btn btn-secondary" onclick="selectMedicineById('metformin-500')">🔵 Metformin 500 mg</button>
+          <button class="btn btn-secondary" onclick="selectMedicineById('amoxicillin-500')">💉 Amoxicillin 500 mg</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── VIEW: RESULT ─── -->
+    <div class="view" id="view-result">
+      <div style="display:flex; align-items:center; gap:var(--space-4); margin-bottom:var(--space-6); flex-wrap:wrap;">
+        <button class="back-btn" data-back="home">← Back</button>
+        <span class="demo-banner" id="result-demo-badge" style="display:none;">🎓 Prototype Demo</span>
+      </div>
+
+      <!-- Medicine Header -->
+      <div class="result-header-card" style="margin-bottom:var(--space-6);">
+        <div class="result-medicine-icon" id="result-medicine-icon-el">💊</div>
+        <div>
+          <div class="result-medicine-label">Medicine information</div>
+          <h2 class="result-medicine-name" id="result-medicine-name">Paracetamol 500 mg</h2>
+          <div class="result-medicine-category" id="result-medicine-category">Pain Relief / Fever</div>
+        </div>
+      </div>
+
+      <div class="result-main-layout">
+
+        <!-- Instructions column -->
+        <div class="result-instructions-grid" id="result-instructions">
+
+          <!-- Medicine card -->
+          <div class="instruction-card">
+            <span class="instruction-card-icon">💊</span>
+            <div class="instruction-card-body">
+              <div class="instruction-card-label">Medicine</div>
+              <div class="instruction-card-en" id="instr-medicine-name">Paracetamol 500 mg</div>
+            </div>
+          </div>
+
+          <!-- When card -->
+          <div class="instruction-card">
+            <span class="instruction-card-icon">🕐</span>
+            <div class="instruction-card-body">
+              <div class="instruction-card-label" id="label-when">When?</div>
+              <div class="instruction-card-en" id="instr-when">Follow the timing given by your doctor or pharmacist.</div>
+            </div>
+          </div>
+
+          <!-- Food card -->
+          <div class="instruction-card">
+            <span class="instruction-card-icon">🍽</span>
+            <div class="instruction-card-body">
+              <div class="instruction-card-label" id="label-food">Food?</div>
+              <div class="instruction-card-en" id="instr-food">Follow the instructions provided with your prescription.</div>
+            </div>
+          </div>
+
+          <!-- Instructions card -->
+          <div class="instruction-card">
+            <span class="instruction-card-icon">📋</span>
+            <div class="instruction-card-body">
+              <div class="instruction-card-label" id="label-notes">Instructions</div>
+              <div class="instruction-card-en" id="instr-notes">Follow your doctor's prescription carefully.</div>
+            </div>
+          </div>
+
+          <!-- Important card -->
+          <div class="instruction-card" style="border-left:4px solid var(--color-warning);">
+            <span class="instruction-card-icon">⚠️</span>
+            <div class="instruction-card-body">
+              <div class="instruction-card-label" id="label-important">Important</div>
+              <div class="instruction-card-en" id="instr-important">Keep out of reach of children.</div>
+            </div>
+          </div>
+
+        </div><!-- /result-instructions-grid -->
+
+        <!-- Aside: Language + Voice -->
+        <div class="result-aside">
+
+          <!-- Language Selector -->
+          <div class="card">
+            <div style="font-size:var(--text-base); font-weight:var(--weight-bold); color:var(--color-navy); margin-bottom:var(--space-4);">
+              🌐 Choose your language
+            </div>
+            <div class="lang-selector">
+              <button class="lang-btn" data-lang="ta" aria-label="Tamil">தமிழ்</button>
+              <button class="lang-btn" data-lang="en" aria-label="English">English</button>
+              <button class="lang-btn" data-lang="hi" aria-label="Hindi">हिन्दी</button>
+              <button class="lang-btn" data-lang="te" aria-label="Telugu">తెలుగు</button>
+              <button class="lang-btn" data-lang="kn" aria-label="Kannada">ಕನ್ನಡ</button>
+              <button class="lang-btn" data-lang="ml" aria-label="Malayalam">മലയാളം</button>
+            </div>
+          </div>
+
+          <!-- Voice Player -->
+          <div class="voice-player" aria-label="Voice instructions player">
+            <div class="voice-player-title">VOICE INSTRUCTIONS</div>
+
+            <!-- Sound wave -->
+            <div class="sound-wave" id="sound-wave" aria-hidden="true">
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+            </div>
+
+            <button class="voice-play-btn" id="voice-play-btn" aria-label="Listen to instructions">
+              🔊
+            </button>
+
+            <div class="voice-label" id="voice-label">கேளுங்கள்</div>
+            <div class="voice-sublabel">Tap once to hear the instructions</div>
+
+            <div class="voice-status" id="voice-status" aria-live="polite"></div>
+
+            <button class="voice-stop-btn" id="voice-stop-btn" aria-label="Stop voice playback">
+              ⏹ Stop
+            </button>
+
+            <div class="voice-unavailable" id="voice-unavailable" role="alert"></div>
+          </div>
+
+          <!-- Easy Mode -->
+          <div class="card" style="text-align:center;">
+            <div style="font-size:var(--text-base); font-weight:var(--weight-bold); color:var(--color-navy); margin-bottom:var(--space-2);">👵 Easy Mode</div>
+            <div style="font-size:var(--text-sm); color:var(--color-gray); margin-bottom:var(--space-4);">Larger text and buttons</div>
+            <button class="btn btn-secondary btn-full" id="easy-mode-toggle-result" onclick="Accessibility.setEasyMode(!Accessibility.isEasyMode()); updateEasyModeBtn();">
+              Enable Easy Mode
+            </button>
+          </div>
+
+          <!-- Safety Notice -->
+          <div class="safety-notice">
+            <span class="safety-notice-icon">⚠️</span>
+            <div>
+              <div class="safety-notice-title">Always follow your doctor</div>
+              <div class="safety-notice-text">This information is for accessibility purposes. Please confirm details with your pharmacist.</div>
+            </div>
+          </div>
+
+        </div><!-- /result-aside -->
+      </div><!-- /result-main-layout -->
+    </div><!-- /view-result -->
+
+  </div><!-- /assistant-inner -->
+</section>
+
+<!-- ════════════════════ HOW IT WORKS ═══════════════════════════ -->
+<section class="how-it-works section" id="how-it-works" aria-labelledby="how-heading">
+  <div class="container">
+    <div class="section-header reveal">
+      <p class="section-label">Simple process</p>
+      <h2 class="section-title" id="how-heading">From medicine strip to spoken instructions.</h2>
+      <p class="section-subtitle">Four simple steps — no technical knowledge required.</p>
+    </div>
+
+    <div class="steps-grid">
+      <div class="step-card reveal">
+        <div class="step-number">01</div>
+        <div class="step-content">
+          <div class="step-label">SCAN</div>
+          <h3 class="step-title">Take a photo</h3>
+          <p class="step-desc">Take a clear photo of your medicine strip or packet. The medicine name should be visible.</p>
+        </div>
+      </div>
+      <div class="step-card reveal reveal-delay-1">
+        <div class="step-number">02</div>
+        <div class="step-content">
+          <div class="step-label">READ</div>
+          <h3 class="step-title">Medicine identified</h3>
+          <p class="step-desc">DoseSpeak reads the medicine name from the image and locates the relevant information.</p>
+        </div>
+      </div>
+      <div class="step-card reveal reveal-delay-2">
+        <div class="step-number">03</div>
+        <div class="step-content">
+          <div class="step-label">UNDERSTAND</div>
+          <h3 class="step-title">Instructions in your language</h3>
+          <p class="step-desc">Instructions are presented clearly in Tamil, English, Hindi or your preferred language.</p>
+        </div>
+      </div>
+      <div class="step-card reveal reveal-delay-3">
+        <div class="step-number">04</div>
+        <div class="step-content">
+          <div class="step-label">LISTEN</div>
+          <h3 class="step-title">Hear the instructions</h3>
+          <p class="step-desc">Tap once and DoseSpeak reads the instructions aloud. No reading required.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════ TECHNOLOGY ═════════════════════════════ -->
+<section class="technology section" aria-labelledby="tech-heading">
+  <div class="container">
+    <div class="section-header reveal">
+      <p class="section-label">AI / Technology</p>
+      <h2 class="section-title" id="tech-heading">Technology that makes healthcare more accessible.</h2>
+      <p class="section-subtitle">Simple, purposeful technology in service of people — not the other way around.</p>
+    </div>
+
+    <div class="tech-grid">
+      <div class="tech-card reveal">
+        <span class="tech-card-icon">📷</span>
+        <h3 class="tech-card-title">OCR</h3>
+        <p class="tech-card-desc">Optical Character Recognition reads medicine names from photos. No internet required for basic recognition.</p>
+      </div>
+      <div class="tech-card reveal reveal-delay-1">
+        <span class="tech-card-icon">🧠</span>
+        <h3 class="tech-card-title">Language Processing</h3>
+        <p class="tech-card-desc">Matches identified medicine names to structured instructions and presents them in a clear, readable format.</p>
+      </div>
+      <div class="tech-card reveal reveal-delay-2">
+        <span class="tech-card-icon">🌐</span>
+        <h3 class="tech-card-title">Translation</h3>
+        <p class="tech-card-desc">Instructions are available in six Indian languages including Tamil, Hindi, Telugu, Kannada and Malayalam.</p>
+      </div>
+      <div class="tech-card reveal reveal-delay-3">
+        <span class="tech-card-icon">🔊</span>
+        <h3 class="tech-card-title">Text-to-Speech</h3>
+        <p class="tech-card-desc">Browser speech synthesis converts the written instructions into spoken audio in the user's selected language.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ REAL-WORLD PROBLEM ══════════════════════ -->
+<section class="problem-section" aria-labelledby="problem-heading">
+  <div class="container">
+    <div class="problem-inner">
+      <div class="reveal">
+        <div class="problem-quote" id="problem-heading">
+          "A simple instruction<br/>
+          <span>can be easy to forget."</span>
+        </div>
+        <p class="problem-text">
+          At a busy pharmacy counter, medicine instructions may be explained quickly. For some elderly patients, remembering those instructions later can be difficult. Small text, unfamiliar language and hearing difficulties can make the problem even harder.
+        </p>
+        <div class="problem-solution">
+          "DoseSpeak makes the information easier to see, understand and hear."
+        </div>
+      </div>
+
+      <div class="problem-illustration reveal reveal-delay-1">
+        <div class="problem-illustration-inner">
+          <div class="problem-people">
+            <div class="problem-person">
+              <div class="problem-person-emoji">👴</div>
+              <div class="problem-person-label">Elderly Patient</div>
+            </div>
+            <div class="problem-person">
+              <div class="problem-person-emoji">👩</div>
+              <div class="problem-person-label">Family / Caregiver</div>
+            </div>
+            <div class="problem-person">
+              <div class="problem-person-emoji">💊</div>
+              <div class="problem-person-label">Pharmacy</div>
+            </div>
+          </div>
+          <div class="problem-arrow">↓</div>
+          <div class="problem-medicine-card">
+            <div class="problem-medicine-card-icon">📱</div>
+            <div>
+              <div class="problem-medicine-card-text">DoseSpeak</div>
+              <div class="problem-medicine-card-sub">Scan → Understand → Listen</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════ RESEARCH ════════════════════════════════ -->
+<section class="research-section" id="research" aria-labelledby="research-heading">
+  <div class="container">
+    <div class="section-header reveal">
+      <p class="section-label">Student Research</p>
+      <h2 class="section-title" id="research-heading">Built around a real-world problem.</h2>
+      <p class="section-subtitle">Survey and observation data collected from pharmacy interactions.</p>
+    </div>
+
+    <div class="research-stats-grid">
+      <div class="stat-card reveal">
+        <div class="stat-value">[X]</div>
+        <div class="stat-label">People surveyed</div>
+        <div class="stat-source">Student survey</div>
+      </div>
+      <div class="stat-card reveal reveal-delay-1">
+        <div class="stat-value">[X]%</div>
+        <div class="stat-label">Asked for instructions to be repeated</div>
+        <div class="stat-source">Student survey</div>
+      </div>
+      <div class="stat-card reveal reveal-delay-2">
+        <div class="stat-value">[X]s</div>
+        <div class="stat-label">Average explanation time</div>
+        <div class="stat-source">Observation</div>
+      </div>
+      <div class="stat-card reveal reveal-delay-3">
+        <div class="stat-value">[X]%</div>
+        <div class="stat-label">Preferred spoken instructions</div>
+        <div class="stat-source">Student survey</div>
+      </div>
+    </div>
+
+    <!-- Comparison Chart -->
+    <div class="chart-wrap reveal" style="margin-top:var(--space-10);">
+      <h3 class="chart-title">Elderly vs. Younger Participants — Comparison</h3>
+
+      <div class="chart-bar-group">
+        <p style="font-size:var(--text-sm); font-weight:var(--weight-semibold); color:var(--color-navy); margin-bottom:var(--space-4);">Average explanation time needed</p>
+        <div class="chart-bar-row">
+          <div class="chart-bar-label">Elderly Participants</div>
+          <div class="chart-bar-track">
+            <div class="chart-bar-fill-elderly" data-width="78%" style="width:0%;">78%</div>
+          </div>
+        </div>
+        <div class="chart-bar-row">
+          <div class="chart-bar-label">Younger Participants</div>
+          <div class="chart-bar-track">
+            <div class="chart-bar-fill-younger" data-width="35%" style="width:0%;">35%</div>
+          </div>
+        </div>
+
+        <p style="font-size:var(--text-sm); font-weight:var(--weight-semibold); color:var(--color-navy); margin:var(--space-6) 0 var(--space-4);">Preference for spoken instructions</p>
+        <div class="chart-bar-row">
+          <div class="chart-bar-label">Elderly Participants</div>
+          <div class="chart-bar-track">
+            <div class="chart-bar-fill-elderly" data-width="85%" style="width:0%;">85%</div>
+          </div>
+        </div>
+        <div class="chart-bar-row">
+          <div class="chart-bar-label">Younger Participants</div>
+          <div class="chart-bar-track">
+            <div class="chart-bar-fill-younger" data-width="42%" style="width:0%;">42%</div>
+          </div>
+        </div>
+
+        <p style="font-size:var(--text-sm); font-weight:var(--weight-semibold); color:var(--color-navy); margin:var(--space-6) 0 var(--space-4);">Requests for instruction repetition</p>
+        <div class="chart-bar-row">
+          <div class="chart-bar-label">Elderly Participants</div>
+          <div class="chart-bar-track">
+            <div class="chart-bar-fill-elderly" data-width="65%" style="width:0%;">65%</div>
+          </div>
+        </div>
+        <div class="chart-bar-row">
+          <div class="chart-bar-label">Younger Participants</div>
+          <div class="chart-bar-track">
+            <div class="chart-bar-fill-younger" data-width="18%" style="width:0%;">18%</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chart-legend">
+        <div class="chart-legend-item">
+          <div class="chart-legend-dot" style="background:var(--color-brand);"></div>
+          Elderly Participants
+        </div>
+        <div class="chart-legend-item">
+          <div class="chart-legend-dot" style="background:var(--color-teal);"></div>
+          Younger Participants
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center; margin-top:var(--space-8);">
+      <span class="research-source-badge">📊 Student survey / observation data — values are illustrative placeholders</span>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════ ABOUT ═══════════════════════════════════ -->
+<section class="about-section" id="about" aria-labelledby="about-heading">
+  <div class="container">
+    <div class="section-header reveal">
+      <p class="section-label">About DoseSpeak</p>
+      <h2 class="section-title" id="about-heading">Why DoseSpeak?</h2>
+    </div>
+
+    <div class="about-grid">
+      <div class="about-card reveal">
+        <div class="about-card-icon">🏥</div>
+        <h3 class="about-card-title">The Problem</h3>
+        <p class="about-card-text">
+          Elderly patients may struggle to remember verbal medicine instructions or read small text after leaving a pharmacy. Language barriers and hearing difficulties make this even more challenging.
+        </p>
+      </div>
+      <div class="about-card reveal reveal-delay-1">
+        <div class="about-card-icon">💡</div>
+        <h3 class="about-card-title">The Solution</h3>
+        <p class="about-card-text">
+          DoseSpeak presents instructions clearly in the patient's preferred language and reads them aloud on demand. One tap is all it takes.
+        </p>
+      </div>
+      <div class="about-card reveal reveal-delay-2">
+        <div class="about-card-icon">👥</div>
+        <h3 class="about-card-title">Who It Helps</h3>
+        <p class="about-card-text">
+          Elderly patients, family members, caregivers, and pharmacy attendants — anyone who wants medicine instructions to be clear, accessible and understandable.
+        </p>
+      </div>
+
+      <!-- Vision Card -->
+      <div class="vision-card reveal">
+        <div class="vision-card-label">Our Vision</div>
+        <div class="vision-card-text">
+          "Make medicine information easier to access, regardless of age, language or reading difficulty."
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════ HELP & SAFETY ══════════════════════════ -->
+<section class="help-section" id="help-safety" aria-labelledby="help-heading">
+  <div class="container">
+    <div class="section-header reveal">
+      <p class="section-label">Help &amp; Safety</p>
+      <h2 class="section-title" id="help-heading">We're here to help.</h2>
+    </div>
+
+    <div class="help-grid">
+      <!-- FAQ -->
+      <div>
+        <h3 style="font-size:var(--text-2xl); font-weight:var(--weight-bold); color:var(--color-navy); margin-bottom:var(--space-6);">Frequently Asked Questions</h3>
+        <div class="faq-list">
+          <div class="faq-item">
+            <button class="faq-question" aria-expanded="false">
+              How do I scan a medicine?
+              <span class="faq-chevron" aria-hidden="true">▼</span>
+            </button>
+            <div class="faq-answer">
+              <div class="faq-answer-inner">
+                Take a clear photo of your medicine strip or packet. Make sure the medicine name is clearly visible and the lighting is good. Tap "Scan Medicine" and then open your camera or upload the photo.
+              </div>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-question" aria-expanded="false">
+              Can I use Tamil?
+              <span class="faq-chevron" aria-hidden="true">▼</span>
+            </button>
+            <div class="faq-answer">
+              <div class="faq-answer-inner">
+                Yes. Tamil is fully supported and is the default language in DoseSpeak. After searching or scanning your medicine, select <strong>தமிழ்</strong> from the language options to read instructions in Tamil. Voice playback in Tamil is available on supported devices.
+              </div>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-question" aria-expanded="false">
+              Can I hear the instructions?
+              <span class="faq-chevron" aria-hidden="true">▼</span>
+            </button>
+            <div class="faq-answer">
+              <div class="faq-answer-inner">
+                Yes. On the medicine information screen, tap the large <strong>🔊 Listen</strong> button. DoseSpeak will read the instructions aloud in your selected language. Make sure your device volume is turned up.
+              </div>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-question" aria-expanded="false">
+              What if DoseSpeak cannot read my medicine?
+              <span class="faq-chevron" aria-hidden="true">▼</span>
+            </button>
+            <div class="faq-answer">
+              <div class="faq-answer-inner">
+                Try taking another clear photo with better lighting. If the scan still doesn't work, tap <strong>"Enter Medicine"</strong> and type the medicine name manually. You can also search from the list of available medicines.
+              </div>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-question" aria-expanded="false">
+              What is Easy Mode?
+              <span class="faq-chevron" aria-hidden="true">▼</span>
+            </button>
+            <div class="faq-answer">
+              <div class="faq-answer-inner">
+                Easy Mode increases the text size, button size, and spacing across the whole website to make it easier to use for elderly users or those with vision difficulties. You can enable it from the Accessibility menu in the header, or from the medicine information screen.
+              </div>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-question" aria-expanded="false">
+              Is my medicine photo stored?
+              <span class="faq-chevron" aria-hidden="true">▼</span>
+            </button>
+            <div class="faq-answer">
+              <div class="faq-answer-inner">
+                No. DoseSpeak processes your medicine photo directly in your browser. The image is not uploaded to any server or permanently stored. Your privacy is respected.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Safety Block -->
+      <div class="safety-block reveal reveal-delay-1">
+        <h3 class="safety-title">Helpful technology. Human decisions.</h3>
+
+        <div class="safety-disclaimer">
+          DoseSpeak does not diagnose medical conditions, prescribe medicines, or decide dosage.
+        </div>
+
+        <p style="font-size:var(--text-base); color:var(--color-gray); margin-bottom:var(--space-5);">
+          DoseSpeak is an accessibility and instruction-reading tool. Always follow:
+        </p>
+
+        <div class="safety-rule-list">
+          <div class="safety-rule">
+            <span class="safety-rule-icon">👨‍⚕️</span>
+            Your doctor's prescription
+          </div>
+          <div class="safety-rule">
+            <span class="safety-rule-icon">💊</span>
+            Your pharmacist's instructions
+          </div>
+          <div class="safety-rule">
+            <span class="safety-rule-icon">📋</span>
+            The official medicine label
+          </div>
+        </div>
+
+        <div class="safety-cta">
+          If you are unsure, <strong>please ask your doctor or pharmacist.</strong>
+        </div>
+
+        <!-- Privacy -->
+        <div style="margin-top:var(--space-6); padding:var(--space-4); background:var(--color-surface); border-radius:var(--radius-md); border:1px solid var(--color-border-light);">
+          <div style="font-size:var(--text-sm); font-weight:var(--weight-semibold); color:var(--color-navy); margin-bottom:var(--space-2);">🔒 Privacy</div>
+          <p style="font-size:var(--text-sm); color:var(--color-gray); line-height:var(--leading-normal);">
+            DoseSpeak does not permanently store your medicine photos or personal information. All image processing happens directly in your browser. No API keys are exposed.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════ FOOTER ═════════════════════════════════ -->
+<footer class="footer" role="contentinfo">
+  <div class="container">
+    <div class="footer-top">
+      <div class="footer-brand">
+        <div class="footer-logo">💊 DoseSpeak</div>
+        <p class="footer-tagline">Scan it. Understand it. Hear it.</p>
+        <p class="footer-privacy-note">DoseSpeak does not store your personal data or medicine images. Your information stays on your device.</p>
+      </div>
+
+      <div class="footer-links-group">
+        <div class="footer-links-title">Product</div>
+        <a class="footer-link" href="#medicine-assistant">Try DoseSpeak</a>
+        <a class="footer-link" href="#how-it-works">How It Works</a>
+        <a class="footer-link" href="#research">Research</a>
+        <a class="footer-link" href="#about">About</a>
+      </div>
+
+      <div class="footer-links-group">
+        <div class="footer-links-title">Support</div>
+        <a class="footer-link" href="#help-safety">Help &amp; Safety</a>
+        <a class="footer-link" href="#help-safety">Safety Notice</a>
+      </div>
+
+      <div class="footer-links-group">
+        <div class="footer-links-title">Languages</div>
+        <a class="footer-link" onclick="setLanguage('ta')">தமிழ் — Tamil</a>
+        <a class="footer-link" onclick="setLanguage('en')">English</a>
+        <a class="footer-link" onclick="setLanguage('hi')">हिन्दी — Hindi</a>
+        <a class="footer-link" onclick="setLanguage('te')">తెలుగు — Telugu</a>
+        <a class="footer-link" onclick="setLanguage('kn')">ಕನ್ನಡ — Kannada</a>
+        <a class="footer-link" onclick="setLanguage('ml')">മലയാളം — Malayalam</a>
+      </div>
+    </div>
+
+    <div class="footer-bottom">
+      <div class="footer-copy">
+        &copy; 2025 DoseSpeak. An AI/ML Healthcare Accessibility Project.
+      </div>
+      <div class="footer-demo-badge">🎓 Prototype / College Project</div>
+    </div>
+  </div>
+</footer>
+
+<!-- Easy Mode FAB -->
+<button class="easy-mode-fab" id="easy-mode-fab" aria-label="Toggle easy mode">
+  👵 Easy Mode
+</button>
+
+<!-- Demo Mode Button -->
+<button class="demo-mode-btn" id="demo-mode-btn" aria-label="Run demo">
+  🎓 Demo Mode
+</button>
+
+<!-- Toast Notification -->
+<div class="toast hidden" id="toast" role="status" aria-live="polite">
+  Settings updated
+</div>
+
+<!-- JavaScript Modules -->
+<script src="js/data.js"></script>
+<script src="js/voice.js"></script>
+<script src="js/accessibility.js"></script>
+<script src="js/ocr.js"></script>
+<script src="js/app.js"></script>
+
+<script>
+// Helper: update easy mode button text in result view
+function updateEasyModeBtn() {
+  const btn = document.getElementById('easy-mode-toggle-result');
+  if (btn) {
+    btn.textContent = Accessibility.isEasyMode() ? 'Disable Easy Mode' : 'Enable Easy Mode';
+  }
+}
+
+// Allow keyboard on option cards
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('[role="button"]').forEach(el => {
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        el.click();
+      }
+    });
+  });
+});
+</script>
+
+</body>
 </html>

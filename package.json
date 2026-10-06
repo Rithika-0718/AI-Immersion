@@ -1,18 +1,26 @@
 {
   "name": "dosespeak",
   "version": "1.0.0",
-  "description": "DoseSpeak - Accessibility-first healthcare assistant for medicine instructions and voice assistance in multiple Indian languages.",
+  "description": "DoseSpeak — Healthcare Accessibility Web Application (“Scan it. Understand it. Hear it.”)",
+  "main": "index.html",
   "scripts": {
-    "dev": "npx serve .",
-    "start": "npx serve .",
-    "preview": "npx serve ."
+    "start": "npx serve . -l 3000",
+    "dev": "npx serve . -l 3000",
+    "serve": "python3 -m http.server 3000",
+    "preview": "open index.html"
   },
   "keywords": [
     "healthcare",
     "accessibility",
-    "medicine",
-    "voice-assistant",
-    "dosespeak"
+    "elderly-ux",
+    "tamil",
+    "multilingual",
+    "ocr",
+    "speech-synthesis"
   ],
-  "license": "MIT"
+  "author": "DoseSpeak Team",
+  "license": "MIT",
+  "devDependencies": {
+    "serve": "^14.2.4"
+  }
 }
